@@ -1,0 +1,35 @@
+name: Proof of Work Validator
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+jobs:
+  verify-pow:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install cryptography
+
+      - name: Verify Proof-of-Work Tokens
+        env:
+          POW_PUBLIC_KEYS: ${{ secrets.POW_PUBLIC_KEYS }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POW_ADMIN_HANDLES: ${{ secrets.POW_ADMIN_HANDLES }}
+        run: python3 .github/scripts/verify_pow.py

@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+import os
+import uuid
+import json
+import urllib.request
+import urllib.error
+
+def load_env():
+    try:
+        repo_root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
+        env_path = os.path.join(repo_root, ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if "=" in line and not line.strip().startswith("#"):
+                        key, val = line.strip().split("=", 1)
+                        val = val.strip().strip("'\"")
+                        if key not in os.environ:
+                            os.environ[key] = val
+    except Exception:
+        pass
+
+def dispatch_attestation(session_id, tree_hash, state):
+    """Fire a workflow_dispatch event to the PoW Attestation Ledger."""
+    pat = os.environ.get("GITHUB_PAT_LOCAL")
+    repo = os.environ.get("POW_GITHUB_REPO")
+
+    if not pat or not repo:
+        print("⚠️  GITHUB_PAT_LOCAL or POW_GITHUB_REPO not set — skipping server-side attestation.")
+        return False
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/pow-ledger.yml/dispatches"
+    payload = json.dumps({
+        "ref": "main",
+        "inputs": {
+            "session_id": session_id,
+            "tree_hash": tree_hash,
+            "state": state,
+        }
+    }).encode()
+
+    req = urllib.request.Request(url, data=payload, headers={
+        "Authorization": f"Bearer {pat}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+    })
+
+    try:
+        urllib.request.urlopen(req)
+        print(f"📡 Attestation dispatched: session={session_id[:8]}… state={state}")
+        return True
+    except urllib.error.HTTPError as e:
+        print(f"⚠️  Attestation dispatch failed ({e.code}): {e.read().decode()}")
+        return False
+
+def run_custom_checks():
+    check_cmd = os.environ.get("POW_CHECKS_CMD")
+    if not check_cmd:
+        print("✨ No custom checks defined (set POW_CHECKS_CMD in .env to run them).")
+        return True
+
+    print(f"✨ Running custom checks: {check_cmd}")
+    try:
+        subprocess.check_call(check_cmd, shell=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Custom checks failed with exit code {e.returncode}.")
+        return False
+
+if __name__ == "__main__":
+    load_env()
+
+    session_id = str(uuid.uuid4())
+    tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
+
+    dispatch_attestation(session_id, tree_hash, "STARTED")
+
+    passed = run_custom_checks()
+
+    status = "PASSED" if passed else "FAILED"
+    dispatch_attestation(session_id, tree_hash, status)
+
+    if passed:
+        with open(".git/POW_PASSED", "w") as f:
+            json.dump({"session_id": session_id, "status": status}, f)
+        sys.exit(0)
+    else:
+        print("❌ Quality checks failed. Merge aborted.")
+        sys.exit(1)

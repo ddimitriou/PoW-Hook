@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""
+PoW-Hook Pre-Receive Hook (GitHub Enterprise / Self-Hosted)
+
+Verifies the tri-factor RSA signature (tree_hash|session_id|status) on every
+commit in a push.  This is the offline equivalent of verify_pow.py — it does
+NOT query the GitHub Artifacts API because it runs on the server itself.
+"""
+import sys
+import subprocess
+import os
+import base64
+import json
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
+
+
+def verify_push(old_rev, new_rev):
+    keys_json = os.environ.get("POW_PUBLIC_KEYS", "{}")
+    try:
+        public_keys = json.loads(keys_json)
+    except json.JSONDecodeError:
+        print("❌ Server error: POW_PUBLIC_KEYS environment variable is not valid JSON.")
+        return False
+
+    if not public_keys:
+        print("❌ Server error: No public keys configured in POW_PUBLIC_KEYS.")
+        return False
+
+    cmd = ["git", "log", f"{old_rev}..{new_rev}", "--format=%H"]
+    try:
+        output = subprocess.check_output(cmd).decode().strip()
+    except subprocess.CalledProcessError:
+        return True
+
+    if not output:
+        return True
+
+    commits = output.splitlines()
+    for commit_hash in commits:
+        token = subprocess.check_output([
+            "git", "log", "-1",
+            "--format=%(trailers:key=Validated-At-Local,valueonly)",
+            commit_hash
+        ]).decode().strip()
+
+        session = subprocess.check_output([
+            "git", "log", "-1",
+            "--format=%(trailers:key=PoW-Session,valueonly)",
+            commit_hash
+        ]).decode().strip()
+
+        status = subprocess.check_output([
+            "git", "log", "-1",
+            "--format=%(trailers:key=PoW-Status,valueonly)",
+            commit_hash
+        ]).decode().strip()
+
+        tree_hash = subprocess.check_output([
+            "git", "log", "-1", "--format=%T", commit_hash
+        ]).decode().strip()
+
+        if not token or not session or not status:
+            print(f"❌ Commit {commit_hash} is missing required trailers.")
+            return False
+
+        # Reconstruct the tri-factor signing payload
+        sign_payload = f"{tree_hash}|{session}|{status}"
+
+        try:
+            sig_raw = base64.b64decode(token)
+        except Exception:
+            print(f"❌ Signature for commit {commit_hash} is not valid base64.")
+            return False
+
+        valid = False
+        for user, pub_key_pem in public_keys.items():
+            try:
+                public_key = serialization.load_pem_public_key(pub_key_pem.encode())
+                public_key.verify(
+                    sig_raw,
+                    sign_payload.encode(),
+                    padding.PKCS1v15(),
+                    hashes.SHA256()
+                )
+                valid = True
+                print(f"✅ Commit {commit_hash} verified by {user}'s key.")
+                break
+            except Exception:
+                continue
+
+        if not valid:
+            print(f"❌ RSA Signature mismatch for commit {commit_hash}.")
+            return False
+
+    return True
+
+
+def main():
+    for line in sys.stdin:
+        old, new, ref = line.split()
+        if new == "0000000000000000000000000000000000000000":
+            continue
+
+        if not verify_push(old, new):
+            print("-------------------------------------------------------")
+            print("REJECTED: One or more commits bypassed local hooks.")
+            print("Please install the project hooks and re-commit.")
+            print("-------------------------------------------------------")
+            sys.exit(1)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
