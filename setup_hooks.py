@@ -1,83 +1,166 @@
 import os
+import re
 import stat
 import shutil
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
+import json
+import subprocess
+import sys
 
 HOOK_DIR = ".git/hooks"
 TEMPLATE_DIR = "hooks_templates"
 HOOKS_TO_INSTALL = ["pre-commit", "commit-msg", "pre-merge-commit"]
+POW_CONFIG_FILE = ".pow-config.json"
 
-def generate_keys():
-    key_dir = os.path.expanduser("~/.pow")
-    priv_file = os.path.join(key_dir, "private_key.pem")
-    pub_file = os.path.join(key_dir, "public_key.pem")
 
-    os.makedirs(key_dir, exist_ok=True)
+def read_pow_config():
+    if os.path.exists(POW_CONFIG_FILE):
+        with open(POW_CONFIG_FILE) as f:
+            return json.load(f)
+    return {}
 
-    if not os.path.exists(priv_file):
-        print(f"🔑 Generating new RSA Keypair for signing in {key_dir}...")
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
+
+def find_ssh_key():
+    """Return the SSH private key path used for github.com connections."""
+    # Test/CI override — skips ssh -G detection entirely
+    override = os.environ.get("POW_SSH_KEY_OVERRIDE")
+    if override and os.path.exists(override):
+        return override
+
+    # Use ssh -G to resolve the effective identity file (respects ~/.ssh/config)
+    try:
+        out = subprocess.check_output(
+            ["ssh", "-G", "github.com"], stderr=subprocess.DEVNULL
+        ).decode()
+        for line in out.splitlines():
+            if line.startswith("identityfile "):
+                path = os.path.expanduser(line.split(None, 1)[1])
+                if os.path.exists(path):
+                    return path
+    except Exception:
+        pass
+
+    # Fall back to default key locations
+    for candidate in ["~/.ssh/id_rsa", "~/.ssh/id_ed25519", "~/.ssh/id_ecdsa"]:
+        path = os.path.expanduser(candidate)
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+def validate_github_ssh_key(key_path):
+    """
+    Test that key_path authenticates to GitHub via ssh -T.
+    Returns (success: bool, username: str | None).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ssh", "-T",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=5",
+                "-i", key_path,
+                "git@github.com",
+            ],
+            capture_output=True,
+            text=True,
         )
-        priv_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        pub_pem = private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        with open(priv_file, "wb") as f:
-            f.write(priv_pem)
-        with open(pub_file, "wb") as f:
-            f.write(pub_pem)
-        
-        print("✅ Keypair generated.")
+        combined = result.stdout + result.stderr
+        if "successfully authenticated" in combined:
+            m = re.search(r"Hi ([^!]+)!", combined)
+            return True, (m.group(1) if m else None)
+    except Exception:
+        pass
+    return False, None
+
+
+def setup_github_ssh_mode():
+    """
+    Detect the developer's SSH key for GitHub SSH key mode.
+    Returns the key path on success, None on failure.
+    """
+    print("\n🔍 Detecting SSH key for GitHub SSH key mode...")
+    key_path = find_ssh_key()
+
+    if key_path is None:
+        print("❌ No SSH private key found in standard locations (~/.ssh/id_rsa, ~/.ssh/id_ed25519, etc.).")
+        print("   Generate one: ssh-keygen -t ed25519 -C 'your@email.com'")
+        print("   Then add it to your GitHub account: https://github.com/settings/ssh/new")
+        return None
+
+    print(f"   Found: {key_path}")
+    print("   Validating against GitHub...")
+
+    ok, username = validate_github_ssh_key(key_path)
+    if ok:
+        print(f"✅ Authenticated as GitHub user: {username}")
+        print("ℹ️  This key will be used to sign your commits automatically.")
     else:
-        print("✅ Existing RSA Keypair found.")
-        with open(pub_file, "rb") as f:
-            pub_pem = f.read()
+        print("   ⚠️  Could not validate key against GitHub (network/SSH may be unavailable).")
+        print("      Ensure this key is added to your GitHub account before pushing.")
 
-    print("\n--- PUBLIC KEY FOR GITHUB SECRET: POW_PUBLIC_KEYS ---")
-    print(pub_pem.decode().strip())
-    print("-----------------------------------------------------\n")
+    return key_path
+
 
 def install():
     if not os.path.exists(HOOK_DIR):
         print(f"❌ Error: {HOOK_DIR} does not exist. Are you in the root of a Git repository?")
         return
 
-    generate_keys()
+    ssh_key = setup_github_ssh_mode()
+    if ssh_key is None:
+        print("❌ Aborting: cannot install hooks without a valid SSH key.")
+        return
+
+    # Convert Python executable path to MSYS2/Unix format (C:\... → /c/...).
+    # Used in shell wrappers on Windows and in the shebang on Unix.
+    interp = sys.executable.replace("\\", "/")
+    if len(interp) >= 2 and interp[1] == ":":          # C:/... → /c/...
+        interp = "/" + interp[0].lower() + interp[2:]
+
+    on_windows = (os.name == "nt")
 
     for hook_name in HOOKS_TO_INSTALL:
         src = os.path.join(TEMPLATE_DIR, hook_name)
         dst = os.path.join(HOOK_DIR, hook_name)
-        
+
         if not os.path.exists(src):
             print(f"❌ Error: Hook template {src} not found.")
             continue
-            
+
         with open(src, "r") as f:
             content = f.read()
-            
-        repo_root = os.path.abspath(os.getcwd())
-        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
-        
-        if content.startswith("#!/usr/bin/env python3"):
-            content = content.replace("#!/usr/bin/env python3", f"#!{venv_python}", 1)
-            
-        with open(dst, "w") as f:
-            f.write(content)
-        
-        # Make executable
+
+        if on_windows:
+            # Git for Windows runs hooks via its bundled sh.exe, which cannot
+            # exec scripts whose shebang contains an MSYS2-style /c/... path.
+            # Work-around: write a #!/bin/sh wrapper that exec's the Python
+            # payload (saved alongside as <hook_name>.py).
+            py_dst = dst + ".py"
+            with open(py_dst, "w", newline="\n") as f:
+                f.write(content)
+            st = os.stat(py_dst)
+            os.chmod(py_dst, st.st_mode | stat.S_IEXEC)
+
+            wrapper = (
+                "#!/bin/sh\n"
+                f"exec '{interp}' \"$(dirname \"$0\")/{hook_name}.py\" \"$@\"\n"
+            )
+            with open(dst, "w", newline="\n") as f:
+                f.write(wrapper)
+        else:
+            # On Unix, replace the env shebang with the exact interpreter so
+            # the hook works inside virtualenvs without activation.
+            if content.startswith("#!/usr/bin/env python3"):
+                content = content.replace("#!/usr/bin/env python3", f"#!{interp}", 1)
+            with open(dst, "w", newline="\n") as f:
+                f.write(content)
+
         st = os.stat(dst)
         os.chmod(dst, st.st_mode | stat.S_IEXEC)
-        
+
     print("✅ Hooks installed. Proof-of-Work protocol is now active.")
+
 
 if __name__ == "__main__":
     install()

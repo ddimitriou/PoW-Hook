@@ -4,16 +4,59 @@ import os
 import subprocess
 import base64
 import json
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 msg_file = sys.argv[1]
 passed_flag = ".git/POW_PASSED"
-priv_file = os.path.expanduser("~/.pow/private_key.pem")
+
+
+def find_ssh_key():
+    """Return the SSH private key path used for github.com connections."""
+    # Test/CI override — skips ssh -G detection entirely
+    override = os.environ.get("POW_SSH_KEY_OVERRIDE")
+    if override and os.path.exists(override):
+        return override
+
+    try:
+        out = subprocess.check_output(
+            ["ssh", "-G", "github.com"], stderr=subprocess.DEVNULL
+        ).decode()
+        for line in out.splitlines():
+            if line.startswith("identityfile "):
+                path = os.path.expanduser(line.split(None, 1)[1])
+                if os.path.exists(path):
+                    return path
+    except Exception:
+        pass
+    for candidate in ["~/.ssh/id_rsa", "~/.ssh/id_ed25519", "~/.ssh/id_ecdsa"]:
+        path = os.path.expanduser(candidate)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def load_private_key(key_path):
+    """Load a private key from file, handling both OpenSSH and legacy PEM formats."""
+    with open(key_path, "rb") as f:
+        key_data = f.read()
+    if b"OPENSSH PRIVATE KEY" in key_data:
+        return serialization.load_ssh_private_key(key_data, password=None)
+    return serialization.load_pem_private_key(key_data, password=None)
+
+
+def sign_with_key(private_key, payload_bytes):
+    """Sign payload_bytes with the given private key (RSA or Ed25519)."""
+    if isinstance(private_key, RSAPrivateKey):
+        return private_key.sign(payload_bytes, padding.PKCS1v15(), hashes.SHA256())
+    elif isinstance(private_key, Ed25519PrivateKey):
+        return private_key.sign(payload_bytes)
+    raise ValueError(f"Unsupported key type: {type(private_key).__name__}")
+
 
 if os.path.exists(passed_flag):
-    # Read and consume the session metadata written by pre-commit
     with open(passed_flag, "r") as f:
         session_data = json.load(f)
     os.remove(passed_flag)
@@ -21,31 +64,30 @@ if os.path.exists(passed_flag):
     session_id = session_data["session_id"]
     status = session_data["status"]
 
-    if not os.path.exists(priv_file):
-        print(f"❌ Error: RSA Private key not found at {priv_file}. Run install.sh again.")
-        sys.exit(1)
-
     try:
         tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
-
-        # Build the tri-factor signing payload: tree_hash|session_id|status
         sign_payload = f"{tree_hash}|{session_id}|{status}"
 
-        with open(priv_file, "rb") as key_file:
-            private_key = serialization.load_pem_private_key(
-                key_file.read(),
-                password=None,
-            )
+        key_path = find_ssh_key()
+        if not key_path:
+            print("❌ Error: No SSH private key found. Run setup_hooks.py again.")
+            sys.exit(1)
+        private_key = load_private_key(key_path)
 
-        signature = private_key.sign(
-            sign_payload.encode(),
-            padding.PKCS1v15(),
-            hashes.SHA256()
-        )
-
+        signature = sign_with_key(private_key, sign_payload.encode())
         token = base64.b64encode(signature).decode()
 
-        # Inject both trailers: the RSA signature and the session UUID
+        # Strip comment lines (e.g., from MERGE_MSG) before injecting trailers.
+        # Without this, git interpret-trailers appends trailers after comments;
+        # git then strips the comments and the blank line separator is lost,
+        # so %(trailers:...) can no longer find the trailer block.
+        cleaned = subprocess.check_output(
+            ["git", "stripspace", "--strip-comments"],
+            stdin=open(msg_file, "rb"),
+        )
+        with open(msg_file, "wb") as f:
+            f.write(cleaned)
+
         subprocess.check_call([
             "git", "interpret-trailers", "--in-place",
             "--trailer", f"Validated-At-Local: {token}",

@@ -2,9 +2,9 @@
 """
 PoW-Hook Server-Side Verifier (GitHub Actions)
 
-Verifies the tri-factor RSA signature (tree_hash|session_id|status) on every
-commit in a push or pull_request, and optionally cross-references the
-server-side attestation artifact produced by pow-ledger.yml.
+Verifies the Ed25519/RSA SSH signature (tree_hash|session_id|status) on every
+commit in a push or pull_request against the committer's registered GitHub SSH
+keys, and optionally cross-references the server-side attestation artifact.
 """
 import sys
 import os
@@ -13,7 +13,6 @@ import base64
 import json
 import time
 import urllib.request
-import urllib.error
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
@@ -21,6 +20,74 @@ from cryptography.hazmat.primitives import serialization
 
 def run(cmd):
     return subprocess.check_output(cmd, shell=True).decode().strip()
+
+
+# ---------------------------------------------------------------------------
+# GitHub SSH Key Verification
+# ---------------------------------------------------------------------------
+
+def _api_base():
+    return os.environ.get("POW_GITHUB_API_URL", "https://api.github.com").rstrip("/")
+
+
+def get_github_username_for_commit(repo, commit_sha, gh_token):
+    """Resolve the GitHub username of the commit's author via the Commits API."""
+    url = f"{_api_base()}/repos/{repo}/commits/{commit_sha}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {gh_token}",
+        "Accept": "application/vnd.github.v3+json",
+    })
+    try:
+        resp = urllib.request.urlopen(req)
+        data = json.loads(resp.read().decode())
+        return data.get("author", {}).get("login")
+    except Exception as e:
+        print(f"   ⚠️  Could not resolve GitHub username for {commit_sha}: {e}")
+        return None
+
+
+def get_github_ssh_keys(username, gh_token):
+    """Fetch the SSH public keys registered on a GitHub user's account."""
+    url = f"{_api_base()}/users/{username}/keys"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {gh_token}",
+        "Accept": "application/vnd.github.v3+json",
+    })
+    try:
+        resp = urllib.request.urlopen(req)
+        data = json.loads(resp.read().decode())
+        return [k["key"] for k in data]
+    except Exception as e:
+        print(f"   ⚠️  Could not fetch SSH keys for {username}: {e}")
+        return []
+
+
+def verify_with_github_keys(sig_raw, payload_bytes, username, gh_token):
+    """
+    Try to verify sig_raw/payload_bytes against every SSH key registered
+    on GitHub for username.  Supports RSA (PKCS1v15/SHA-256) and Ed25519.
+    Returns True if any key matches.
+    """
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    ssh_keys = get_github_ssh_keys(username, gh_token)
+    if not ssh_keys:
+        return False
+
+    for key_str in ssh_keys:
+        try:
+            pub_key = serialization.load_ssh_public_key(key_str.encode())
+            if isinstance(pub_key, RSAPublicKey):
+                pub_key.verify(sig_raw, payload_bytes, padding.PKCS1v15(), hashes.SHA256())
+            elif isinstance(pub_key, Ed25519PublicKey):
+                pub_key.verify(sig_raw, payload_bytes)
+            else:
+                continue
+            return True
+        except Exception:
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +103,7 @@ def check_attestation_artifact(repo, session_id, gh_token, retries=3, delay=5):
         return None  # Cannot check — treat as inconclusive
 
     artifact_name = f"pow-attestation-{session_id}-PASSED"
-    url = f"https://api.github.com/repos/{repo}/actions/artifacts?name={artifact_name}"
+    url = f"{_api_base()}/repos/{repo}/actions/artifacts?name={artifact_name}"
 
     for attempt in range(retries):
         try:
@@ -65,15 +132,6 @@ def check_attestation_artifact(repo, session_id, gh_token, retries=3, delay=5):
 # ---------------------------------------------------------------------------
 
 def main():
-    keys_json = os.environ.get("POW_PUBLIC_KEYS", "{}")
-    try:
-        public_keys = json.loads(keys_json)
-    except json.JSONDecodeError:
-        sys.exit("❌ POW_PUBLIC_KEYS is not a valid JSON.")
-
-    if not public_keys:
-        sys.exit("❌ POW_PUBLIC_KEYS is empty.")
-
     gh_token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")  # auto-set by Actions
 
@@ -137,9 +195,8 @@ def main():
             missing += 1
             break
 
-        # 2. Verify RSA signature against tri-factor payload
+        # 2. Decode signature
         sign_payload = f"{tree_hash}|{session}|{status}"
-
         try:
             sig_raw = base64.b64decode(token)
         except Exception:
@@ -147,28 +204,21 @@ def main():
             missing += 1
             break
 
-        valid = False
-        for user, pub_key_pem in public_keys.items():
-            try:
-                public_key = serialization.load_pem_public_key(pub_key_pem.encode())
-                public_key.verify(
-                    sig_raw,
-                    sign_payload.encode(),
-                    padding.PKCS1v15(),
-                    hashes.SHA256()
-                )
-                valid = True
-                print(f"   ✅ RSA signature verified by {user}.")
-                break
-            except Exception:
-                continue
-
-        if not valid:
-            print(f"❌ RSA Signature mismatch for commit {commit}.")
+        # 3. Verify signature
+        username = get_github_username_for_commit(repo, commit, gh_token)
+        if not username:
+            print(f"❌ Cannot resolve GitHub username for commit {commit}.")
+            missing += 1
+            break
+        valid = verify_with_github_keys(sig_raw, sign_payload.encode(), username, gh_token)
+        if valid:
+            print(f"   ✅ Signature verified via GitHub SSH keys of {username}.")
+        else:
+            print(f"❌ No matching GitHub SSH key for commit {commit} (user: {username}).")
             missing += 1
             break
 
-        # 3. Cross-reference server-side attestation artifact
+        # 4. Cross-reference server-side attestation artifact
         attestation = check_attestation_artifact(repo, session, gh_token)
         if attestation is False:
             print(f"❌ No server-side attestation found for session {session}.")
