@@ -4,6 +4,10 @@
 
 This reliably defeats developers bypassing rules with `git commit --no-verify`, deleting their `.git/hooks` folder, or skipping local tests — even malicious insiders.
 
+The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the github advanced security product, which runs pre-receive hooks server side and block everything before it hits the git ledger.
+
+This is lower cost approach for smaller teams requiring more stringent controls without allocating a lot of budget, as the main source for this verification is github action minutes.
+
 ---
 
 ## How It Works
