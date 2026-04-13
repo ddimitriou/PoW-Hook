@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel any in-flight run for the same ref when a newer one arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Unit tests
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install cryptography pytest
+
+      - name: Configure git globals
+        run: |
+          git config --global user.email "ci@test.com"
+          git config --global user.name  "CI"
+          git config --global init.defaultBranch master
+
+      - name: Run unit tests
+        run: python -m pytest test_hooks.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Job 2: E2E – GitHub SSH key verification (no act)
+  # Calls verify_pow.py directly against a local mock GitHub API server.
+  # ---------------------------------------------------------------------------
+  e2e-github-ssh:
+    name: "E2E: GitHub SSH verification"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install cryptography
+
+      - name: Configure git globals
+        run: |
+          git config --global user.email "ci@test.com"
+          git config --global user.name  "CI"
+
+      - name: Run GitHub SSH E2E test
+        env:
+          PYTHON: python3
+        run: bash test_ci_github_ssh.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 3: E2E – Trufflehog secret scan (Docker for scan, no act)
+  # Exercises the pre-commit hook and then calls verify_pow.py directly.
+  # ---------------------------------------------------------------------------
+  e2e-trufflehog:
+    name: "E2E: Trufflehog scan"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install cryptography
+
+      - name: Configure git globals
+        run: |
+          git config --global user.email "ci@test.com"
+          git config --global user.name  "CI"
+
+      - name: Pull trufflehog image
+        run: docker pull trufflesecurity/trufflehog:latest
+
+      - name: Run Trufflehog E2E test
+        env:
+          PYTHON: python3
+        run: bash test_ci_trufflehog.sh
