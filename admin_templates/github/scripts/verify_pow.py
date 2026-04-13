@@ -75,13 +75,18 @@ def verify_with_github_keys(sig_raw, payload_bytes, username, gh_token):
     if not ssh_keys:
         return False
 
+    from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PublicKey
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey, ECDSA
+
     for key_str in ssh_keys:
         try:
             pub_key = serialization.load_ssh_public_key(key_str.encode())
             if isinstance(pub_key, RSAPublicKey):
                 pub_key.verify(sig_raw, payload_bytes, padding.PKCS1v15(), hashes.SHA256())
-            elif isinstance(pub_key, Ed25519PublicKey):
+            elif isinstance(pub_key, (Ed25519PublicKey, Ed448PublicKey)):
                 pub_key.verify(sig_raw, payload_bytes)
+            elif isinstance(pub_key, EllipticCurvePublicKey):
+                pub_key.verify(sig_raw, payload_bytes, ECDSA(hashes.SHA256()))
             else:
                 continue
             return True

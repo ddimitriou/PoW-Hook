@@ -1,89 +1,184 @@
 #!/bin/bash
-set -e
+# ---------------------------------------------------------------------------
+# E2E test: Trufflehog local scan + act server-side bypass rejection
+#
+# Requires: act (in PATH), Docker running, Python 3 with cryptography,
+#           trufflesecurity/trufflehog Docker image available
+#
+# Flow:
+#   1. Generate a test Ed25519 SSH keypair
+#   2. Set up a fresh repo in github key_source mode
+#   3. Install hooks with POW_CHECKS_CMD pointing at trufflehog
+#   4. Stage a file containing a fake GitHub PAT
+#   5. Attempt a normal commit → trufflehog must BLOCK it        (CHECK 1)
+#   6. Bypass with --no-verify, then run act push → must FAIL
+#      because the bypass commit has no PoW trailers              (CHECK 2)
+# ---------------------------------------------------------------------------
+set -euo pipefail
 
-echo "🚀 Starting E2E Trufflehog + ACT Test..."
+PYTHON="${PYTHON:-/c/Users/sfitsos/Projects/PoW-Hook/.venv/Scripts/python.exe}"
+ACT="${ACT:-/c/Users/sfitsos/bin/act.exe}"
 
-TEST_DIR="/tmp/pre-hooker-e2e"
-rm -rf "$TEST_DIR"
-cp -r "$(pwd)" "$TEST_DIR"
+echo "🔍 Checking prerequisites..."
+command -v "$ACT" >/dev/null 2>&1 || { echo "❌ 'act' not found. Install from https://github.com/nektos/act"; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "❌ Docker not found."; exit 1; }
+$PYTHON -c "import cryptography" 2>/dev/null || { echo "❌ cryptography package not installed for $PYTHON"; exit 1; }
+docker image inspect trufflesecurity/trufflehog:latest >/dev/null 2>&1 \
+    || docker pull trufflesecurity/trufflehog:latest \
+    || { echo "❌ Could not pull trufflesecurity/trufflehog:latest"; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_DIR="$(mktemp -d)"
+
+cleanup() {
+    set +euo pipefail
+    cd "$SCRIPT_DIR" 2>/dev/null || true
+    rm -rf "$TEST_DIR" 2>/dev/null || true
+    echo "🧹 Cleaned up."
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# 1. Generate test Ed25519 keypair
+# ---------------------------------------------------------------------------
+echo "🔑 Generating test Ed25519 SSH keypair..."
+KEY_PATH="$TEST_DIR/test_id_ed25519"
+ssh-keygen -t ed25519 -f "$KEY_PATH" -N "" -q -C "e2e-trufflehog"
+echo "✅ Keypair at $KEY_PATH"
+
+# ---------------------------------------------------------------------------
+# 2. Set up fresh git repo with GitHub SSH mode
+# ---------------------------------------------------------------------------
+echo "📦 Initialising test repository..."
 cd "$TEST_DIR"
+cp -r "$SCRIPT_DIR"/hooks_templates .
+cp -r "$SCRIPT_DIR"/admin_templates .
+cp "$SCRIPT_DIR"/setup_hooks.py .
+cp "$SCRIPT_DIR"/.env.example .
 
-if [ -d ".venv" ]; then
-    rm -rf .venv
-fi
-if [ -d ".git" ]; then
-    rm -rf .git
-fi
-if [ -d ".github" ]; then
-    rm -rf .github
-fi
-
-echo "📦 Initializing clean local repository..."
 git init
-git config user.name "E2E Test"
+git config user.name  "E2E Test"
 git config user.email "e2e@example.com"
-git add .
-git commit -m "Initial baseline commit"
 
-echo "🔧 Running Install payload..."
-./install.sh
-
-echo "🏗 Configuring GitHub Actions structure natively..."
-# Mocking administrator input '1' for GitHub Actions deployment
-echo "1" | python3 admin_install.py
-
-echo "🛡 Injecting Trufflehog as the underlying local validator..."
-# Trufflehog will scan the filesystem. We use --no-verification to catch everything, and fail securely.
-cat << 'EOF' > .env
-POW_CHECKS_CMD="docker run --rm -v $(pwd):/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail"
+cat > .pow-config.json <<'EOF'
+{"key_source": "github"}
 EOF
 
-# Prepare the secrets file for ACT to authenticate with
-echo "🔐 Constructing Github Action secrets payload..."
-python3 -c '
-import json, sys, os
-pub_path = os.path.expanduser("~/.pow/public_key.pem")
-with open(pub_path, "r") as f:
-    key = f.read()
-secret_json = json.dumps({"test_user": key})
-with open(".secrets", "w") as f:
-    f.write(f"POW_PUBLIC_KEYS={secret_json}\n")
-'
+# POW_CHECKS_CMD: trufflehog scans the working tree for secrets.
+# --no-verification: pattern-match only (no network calls to verify tokens).
+# --fail: exit non-zero when detections are found.
+cat > .env <<'EOF'
+POW_CHECKS_CMD=docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail
+EOF
 
-echo "🏴‍☠️ Injecting Malicious GitHub PAT into the codebase..."
-# Trufflehog requires relatively exact entropy matching. 
-echo "ghp_012345678901234567890123456789012345" > malicious_secret.txt
+# ---------------------------------------------------------------------------
+# 3. Install hooks
+# ---------------------------------------------------------------------------
+echo "🔧 Installing PoW hooks..."
+KEY_PATH_WIN=$(cygpath -w "$KEY_PATH" 2>/dev/null | tr '\\' '/' || echo "$KEY_PATH")
+export POW_SSH_KEY_OVERRIDE="$KEY_PATH_WIN"
+export PYTHONUTF8=1
+echo "   POW_SSH_KEY_OVERRIDE=$POW_SSH_KEY_OVERRIDE"
+$PYTHON setup_hooks.py
+
+# Scaffold .github for the act workflow
+mkdir -p .github/scripts .github/workflows
+cp admin_templates/github/scripts/verify_pow.py .github/scripts/
+
+cat > .github/workflows/pow-validator.yml << 'WORKFLOW'
+name: Proof of Work Validator
+on:
+  push:
+    branches: [main]
+jobs:
+  verify-pow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install deps and verify
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pip install cryptography -q --break-system-packages
+          python3 .github/scripts/verify_pow.py
+WORKFLOW
+
+# Commit baseline (no PoW check on this one — it's the admin setup commit)
+git add .pow-config.json .github
+git commit --no-verify -m "chore: add pow config"
+INITIAL_COMMIT=$(git rev-parse HEAD)
+
+# ---------------------------------------------------------------------------
+# CHECK 1: Trufflehog blocks secret commit locally
+# ---------------------------------------------------------------------------
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo " CHECK 1: Trufflehog blocks secret locally"
+echo "═══════════════════════════════════════════════════"
+
+# GitHub classic PAT format: ghp_ + exactly 36 alphanumeric chars.
+# Trufflehog detects this by regex pattern (--no-verification skips
+# the live API call, so any string matching the pattern is flagged).
+echo "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" > malicious_secret.txt
 git add malicious_secret.txt
 
-echo "🛑 Attempting isolated standard commit. Execution should FAIL instantly via Trufflehog!"
 set +e
-git commit -m "Leak a secret"
+git commit -m "feat: add credential"
 COMMIT_CODE=$?
 set -e
 
-if [ "$COMMIT_CODE" == "0" ]; then
-    echo "❌ ERROR: Trufflehog failed to catch the secret and approved the commit!"
-    exit 1
+if [ "$COMMIT_CODE" -ne 0 ]; then
+    echo "✅ CHECK 1 PASSED: Trufflehog blocked the secret commit."
 else
-    echo "✅ Trufflehog successfully detected the secret and aborted the commit! (Passed Check 1)"
+    echo "❌ CHECK 1 FAILED: Secret commit was not blocked by trufflehog."
+    exit 1
 fi
 
-echo "😈 Maliciously bypassing Trufflehog validation via --no-verify..."
-git commit --no-verify -m "Malicious bypass commit"
-echo "✅ Unverified payload injected into git index simulating insider-threat."
+# ---------------------------------------------------------------------------
+# CHECK 2: Bypass commit → act push must FAIL (missing PoW trailers)
+# ---------------------------------------------------------------------------
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo " CHECK 2: Bypass commit (--no-verify) → must FAIL"
+echo "═══════════════════════════════════════════════════"
 
-echo "☁️ Triggering server-side evaluation via Dockerized ACT natively analyzing the Push Event..."
+git commit --no-verify -m "chore: bypass hooks and inject secret"
+BYPASS_COMMIT=$(git rev-parse HEAD)
+
+cat > .secrets <<'EOF'
+GITHUB_TOKEN=dummy_token
+EOF
+
+cat > /tmp/pow_trufflehog_event.json <<EOF
+{
+  "ref": "refs/heads/main",
+  "before": "$INITIAL_COMMIT",
+  "after":  "$BYPASS_COMMIT",
+  "repository": {"full_name": "owner/repo"},
+  "pusher": {"name": "test_user"}
+}
+EOF
+
 set +e
-# Run ACT in silence to avoid overflowing stdout, just capture exit code matching
-act push --secret-file .secrets
+"$ACT" push \
+    --eventpath /tmp/pow_trufflehog_event.json \
+    --secret-file .secrets \
+    --network host \
+    -P ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-latest \
+    2>&1
 ACT_EXIT=$?
 set -e
 
-if [ "$ACT_EXIT" != "0" ]; then
-    echo "✅ Server gracefully blocked and struck down the unauthorized commit natively mapping RSA failures! (Passed Check 2)"
+if [ "$ACT_EXIT" -ne 0 ]; then
+    echo "✅ CHECK 2 PASSED: act correctly rejected the bypass commit."
 else
-    echo "❌ ERROR: Server allowed the unauthorized commit!"
+    echo "❌ CHECK 2 FAILED: act accepted a commit that bypassed the hooks."
     exit 1
 fi
 
-echo "🎉 E2E Test Pipeline Complete! All military-grade defensive boundaries are holding solid natively against Trufflehog failures!"
+echo ""
+echo "🎉 All Trufflehog E2E checks passed!"
+exit 0
