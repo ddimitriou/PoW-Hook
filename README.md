@@ -1,5 +1,6 @@
 # PoW-Hook: Proof-of-Work Git Validator
 
+[![CI](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml/badge.svg)](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml)
 **PoW-Hook** is an autonomous "Proof of Work" validation system for Git repositories. It cryptographically guarantees that no code enters your remote repository unless it has legitimately passed your local quality, linting, or security checks.
 
 This reliably defeats developers bypassing rules with `git commit --no-verify`, deleting their `.git/hooks` folder, or skipping local tests — even malicious insiders.
@@ -60,10 +61,10 @@ The correct algorithm is chosen automatically at runtime based on the key loaded
 
 ### 1. Administrator Setup
 
-Run once per repository to choose the enforcement backend:
+Run once per repository to choose the enforcement backend. You can pass an optional target directory to install the configuration in a different project.
 
 ```bash
-python3 admin_install.py
+python3 admin_install.py [TARGET_DIR]
 ```
 
 - **Option 1 — GitHub Actions**: Scaffolds `.github/workflows/` and `.github/scripts/` from `admin_templates/github/`.
@@ -73,10 +74,10 @@ Both options write a `.pow-config.json` file that the local hooks read to determ
 
 ### 2. Developer Onboarding
 
-Each developer installs the local hooks:
+Each developer installs the local hooks in their repository. You can pass an optional target repository path.
 
 ```bash
-./install.sh
+./install.sh [TARGET_REPO]
 ```
 
 This will:
@@ -130,10 +131,10 @@ This makes the force-revert a fallback — GitHub natively blocks unverified mer
 ```bash
 # On Linux / macOS
 pip install cryptography pytest
-python -m pytest test_hooks.py -v --tb=short
+python -m pytest tests/test_hooks.py -v --tb=short
 
 # On Windows (runs inside a Docker container — required for git hook execution)
-bash run_tests.sh
+bash tests/run_tests_windows.sh
 ```
 
 ### CI E2E tests (no act required)
@@ -142,20 +143,10 @@ These scripts run `verify_pow.py` directly against a lightweight mock GitHub API
 
 ```bash
 # GitHub SSH signing + server-side verification
-PYTHON=python3 bash test_ci_github_ssh.sh
+PYTHON=python3 bash tests/test_ci_github_ssh.sh
 
 # Trufflehog local scan + server-side bypass rejection (requires Docker)
-PYTHON=python3 bash test_ci_trufflehog.sh
-```
-
-### Local E2E tests with act (full GitHub Actions simulation)
-
-These simulate a real push event inside a Docker container via [act](https://github.com/nektos/act). Useful for validating the complete workflow YAML locally.
-
-```bash
-# Requires: act, Docker, Python 3 with cryptography
-bash test_e2e_github_ssh.sh
-bash test_e2e_act_trufflehog.sh
+PYTHON=python3 bash tests/test_ci_trufflehog.sh
 ```
 
 ---
@@ -177,6 +168,16 @@ E2E jobs only start if unit tests pass. The workflow has no dependency on `act` 
 ## Project Structure
 
 ```
+├── tests/                      # Dedicated tests folder
+│   ├── test_hooks.py               # Unit test suite
+│   ├── test_mock_github_api.py     # Mock GitHub API server
+│   ├── test_ci_github_ssh.sh       # CI E2E: GitHub SSH signing
+│   ├── test_ci_trufflehog.sh       # CI E2E: Trufflehog scan
+│   ├── test_e2e_github_ssh.sh      # Local E2E: act simulation
+│   ├── test_e2e_act_trufflehog.sh  # Local E2E: act trufflehog
+│   ├── run_tests_windows.sh        # Dockerized test runner (Windows-only)
+│   └── Dockerfile.test            # Container for unit tests
+│
 ├── hooks_templates/
 │   ├── pre-commit              # Runs checks, dispatches attestation, writes session
 │   ├── pre-merge-commit        # Same as pre-commit, for merge operations
@@ -196,17 +197,9 @@ E2E jobs only start if unit tests pass. The workflow has no dependency on `act` 
 │   └── workflows/
 │       └── ci.yml                  # CI: unit tests + E2E tests on every push / PR
 │
-├── admin_install.py            # Interactive admin setup (GitHub Actions or Enterprise)
-├── install.sh                  # Developer onboarding (detects SSH key, installs hooks)
-├── setup_hooks.py              # Hook installer with correct interpreter shebang
-│
-├── test_hooks.py               # Unit test suite (signing, verification, merge flows)
-├── test_mock_github_api.py     # Standalone mock GitHub API server (keys/commits/artifacts)
-│
-├── test_ci_github_ssh.sh       # CI E2E: GitHub SSH signing + verify_pow.py (no act)
-├── test_ci_trufflehog.sh       # CI E2E: Trufflehog scan + bypass rejection (no act)
-├── test_e2e_github_ssh.sh      # Local E2E: full act simulation, GitHub SSH mode
-├── test_e2e_act_trufflehog.sh  # Local E2E: full act simulation, Trufflehog mode
+├── admin_install.py            # Interactive admin setup (path-independent)
+├── install.sh                  # Developer onboarding (path-independent)
+├── setup_hooks.py              # Hook installer with cross-platform shebang handling
 │
 ├── .env.example                # Environment variable template
 ├── .gitignore
