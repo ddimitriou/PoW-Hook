@@ -5,10 +5,13 @@ echo "🚀 Installing Proof-of-Work Git Hooks..."
 
 
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET_REPO="${1:-.}"
+
 # Configure .env if it doesn't exist
-if [ ! -f .env ]; then
+if [ ! -f "$TARGET_REPO/.env" ]; then
     echo "📄 Creating .env from .env.example..."
-    cp .env.example .env
+    cp "$SCRIPT_DIR/.env.example" "$TARGET_REPO/.env"
 fi
 
 # Setup standard virtual environment
@@ -20,7 +23,7 @@ source .venv/bin/activate
 pip install cryptography 2>/dev/null || true
 
 # Run python install script
-python3 setup_hooks.py
+python3 "$SCRIPT_DIR/setup_hooks.py" "$TARGET_REPO"
 
 echo ""
 echo "--------------------------------------------------------"

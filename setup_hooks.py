@@ -6,15 +6,17 @@ import json
 import subprocess
 import sys
 
-HOOK_DIR = ".git/hooks"
-TEMPLATE_DIR = "hooks_templates"
+HOOK_DIR_TPL = ".git/hooks"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "hooks_templates")
 HOOKS_TO_INSTALL = ["pre-commit", "commit-msg", "pre-merge-commit"]
-POW_CONFIG_FILE = ".pow-config.json"
+POW_CONFIG_FILE_TPL = ".pow-config.json"
 
 
-def read_pow_config():
-    if os.path.exists(POW_CONFIG_FILE):
-        with open(POW_CONFIG_FILE) as f:
+def read_pow_config(target_repo="."):
+    config_file = os.path.join(target_repo, POW_CONFIG_FILE_TPL)
+    if os.path.exists(config_file):
+        with open(config_file) as f:
             return json.load(f)
     return {}
 
@@ -103,8 +105,11 @@ def setup_github_ssh_mode():
 
 
 def install():
-    if not os.path.exists(HOOK_DIR):
-        print(f"❌ Error: {HOOK_DIR} does not exist. Are you in the root of a Git repository?")
+    target_repo = sys.argv[1] if len(sys.argv) > 1 else "."
+    hook_dir = os.path.join(target_repo, HOOK_DIR_TPL)
+
+    if not os.path.exists(hook_dir):
+        print(f"❌ Error: {hook_dir} does not exist. Are you pointing to the root of a Git repository?")
         return
 
     ssh_key = setup_github_ssh_mode()
@@ -112,17 +117,19 @@ def install():
         print("❌ Aborting: cannot install hooks without a valid SSH key.")
         return
 
-    # Convert Python executable path to MSYS2/Unix format (C:\... → /c/...).
-    # Used in shell wrappers on Windows and in the shebang on Unix.
+    # Resolve the Python interpreter path.
+    # On Windows (Git for Windows/MSYS2), we must use the Unix-style path
+    # (/c/...) so the shell wrappers can execute it correctly.
     interp = sys.executable.replace("\\", "/")
-    if len(interp) >= 2 and interp[1] == ":":          # C:/... → /c/...
+    if os.name == "nt" and len(interp) >= 2 and interp[1] == ":":
+        # C:/path -> /c/path
         interp = "/" + interp[0].lower() + interp[2:]
 
     on_windows = (os.name == "nt")
 
     for hook_name in HOOKS_TO_INSTALL:
         src = os.path.join(TEMPLATE_DIR, hook_name)
-        dst = os.path.join(HOOK_DIR, hook_name)
+        dst = os.path.join(hook_dir, hook_name)
 
         if not os.path.exists(src):
             print(f"❌ Error: Hook template {src} not found.")

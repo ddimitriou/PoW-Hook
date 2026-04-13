@@ -34,7 +34,7 @@ jobs:
           git config --global init.defaultBranch master
 
       - name: Run unit tests
-        run: python -m pytest test_hooks.py -v --tb=short
+        run: python -m pytest tests/test_hooks.py -v --tb=short
 
   # ---------------------------------------------------------------------------
   # Job 2: E2E – GitHub SSH key verification (no act)
@@ -63,7 +63,7 @@ jobs:
       - name: Run GitHub SSH E2E test
         env:
           PYTHON: python3
-        run: bash test_ci_github_ssh.sh
+        run: bash tests/test_ci_github_ssh.sh
 
   # ---------------------------------------------------------------------------
   # Job 3: E2E – Trufflehog secret scan (Docker for scan, no act)
@@ -95,4 +95,4 @@ jobs:
       - name: Run Trufflehog E2E test
         env:
           PYTHON: python3
-        run: bash test_ci_trufflehog.sh
+        run: bash tests/test_ci_trufflehog.sh
