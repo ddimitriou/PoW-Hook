@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+
+# Environment / secrets
+.env
+*.pub
+
+# Test / pytest cache
+.pytest_cache/
+
+# E2E test artefacts (temp public key written by test_e2e_github_ssh.sh)
+.pow_e2e_pubkey.pub

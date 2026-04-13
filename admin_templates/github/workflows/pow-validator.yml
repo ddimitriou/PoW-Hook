@@ -29,7 +29,7 @@ jobs:
 
       - name: Verify Proof-of-Work Tokens
         env:
-          POW_PUBLIC_KEYS: ${{ secrets.POW_PUBLIC_KEYS }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POW_ADMIN_HANDLES: ${{ secrets.POW_ADMIN_HANDLES }}
+          POW_GITHUB_API_URL: ${{ secrets.POW_GITHUB_API_URL }}
         run: python3 .github/scripts/verify_pow.py
