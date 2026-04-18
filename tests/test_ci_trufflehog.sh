@@ -151,6 +151,7 @@ GITHUB_REPOSITORY=owner/repo \
 GITHUB_EVENT_NAME=push \
 GITHUB_EVENT_PATH="$TEST_DIR/bypass_event.json" \
 GITHUB_REF=refs/heads/main \
+POW_CHECKS_CMD='docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail' \
 $PYTHON admin_templates/github/scripts/verify_pow.py 2>&1
 CHECK2_EXIT=$?
 set -e

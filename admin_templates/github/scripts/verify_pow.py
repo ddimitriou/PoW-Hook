@@ -13,6 +13,7 @@ import base64
 import json
 import time
 import urllib.request
+import hashlib
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
@@ -99,7 +100,7 @@ def verify_with_github_keys(sig_raw, payload_bytes, username, gh_token):
 # Attestation Artifact Lookup
 # ---------------------------------------------------------------------------
 
-def check_attestation_artifact(repo, session_id, gh_token, retries=3, delay=5):
+def check_attestation_artifact(repo, session_id, expected_hash, gh_token, retries=3, delay=5):
     """
     Query GitHub's Artifacts API to confirm a PASSED attestation artifact
     exists for the given session_id.  Returns True if found.
@@ -107,7 +108,7 @@ def check_attestation_artifact(repo, session_id, gh_token, retries=3, delay=5):
     if not gh_token or not repo:
         return None  # Cannot check — treat as inconclusive
 
-    artifact_name = f"pow-attestation-{session_id}-PASSED"
+    artifact_name = f"pow-attestation-{session_id}-{expected_hash}-PASSED"
     url = f"{_api_base()}/repos/{repo}/actions/artifacts?name={artifact_name}"
 
     for attempt in range(retries):
@@ -139,6 +140,9 @@ def check_attestation_artifact(repo, session_id, gh_token, retries=3, delay=5):
 def main():
     gh_token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")  # auto-set by Actions
+    
+    expected_cmd = os.environ.get("POW_CHECKS_CMD", "none")
+    expected_hash = hashlib.sha256(expected_cmd.encode()).hexdigest()
 
     # ---- Resolve commit range ----
     event_name = os.environ.get("GITHUB_EVENT_NAME")
@@ -189,19 +193,34 @@ def main():
     for commit in commits:
         print(f"\n🔍 Verifying commit {commit}…")
 
-        token     = run(f'git log -1 --format="%(trailers:key=Validated-At-Local,valueonly)" {commit}')
-        session   = run(f'git log -1 --format="%(trailers:key=PoW-Session,valueonly)" {commit}')
-        status    = run(f'git log -1 --format="%(trailers:key=PoW-Status,valueonly)" {commit}')
+        pow_checks_b64 = run(f'git log -1 --format="%(trailers:key=PoW-Checks,valueonly)" {commit}')
         tree_hash = run(f"git log -1 --format=%T {commit}")
 
-        # 1. Check trailers exist
-        if not token or not session or not status:
-            print(f"❌ Commit {commit} missing required trailers.")
+        # 1. Check trailer exists
+        if not pow_checks_b64:
+            print(f"❌ Commit {commit} missing required PoW-Checks trailer.")
+            missing += 1
+            break
+            
+        try:
+            bundle_json = base64.b64decode(pow_checks_b64).decode()
+            bundle = json.loads(bundle_json)
+            token = bundle["token"]
+            session = bundle["session"]
+            status = bundle["status"]
+            cmd_hash = bundle["checks_hash"]
+        except Exception:
+            print(f"❌ Commit {commit} PoW-Checks trailer is not valid base64 JSON.")
+            missing += 1
+            break
+            
+        if cmd_hash != expected_hash:
+            print(f"❌ Commit {commit} used incorrect POW_CHECKS_CMD (hash mismatch).")
             missing += 1
             break
 
         # 2. Decode signature
-        sign_payload = f"{tree_hash}|{session}|{status}"
+        sign_payload = f"{cmd_hash}|{tree_hash}|{session}|{status}"
         try:
             sig_raw = base64.b64decode(token)
         except Exception:
@@ -224,7 +243,7 @@ def main():
             break
 
         # 4. Cross-reference server-side attestation artifact
-        attestation = check_attestation_artifact(repo, session, gh_token)
+        attestation = check_attestation_artifact(repo, session, expected_hash, gh_token)
         if attestation is False:
             print(f"❌ No server-side attestation found for session {session}.")
             missing += 1

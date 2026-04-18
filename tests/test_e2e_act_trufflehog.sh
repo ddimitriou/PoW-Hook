@@ -113,6 +113,7 @@ jobs:
       - name: Install deps and verify
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
         run: |
           pip install cryptography -q --break-system-packages
           python3 .github/scripts/verify_pow.py
