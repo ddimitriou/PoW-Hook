@@ -5,9 +5,11 @@
 
 This reliably defeats developers bypassing rules with `git commit --no-verify`, deleting their `.git/hooks` folder, or skipping local tests — even malicious insiders.
 
-The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the github advanced security product, which runs pre-receive hooks server side and block everything before it hits the git ledger.
+The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the github advanced security product, which runs a pre-receive hook server side and block everything before it hits the git ledger.
 
-This is lower cost approach for smaller teams requiring more stringent controls without allocating a lot of budget, as the main source for this verification is github action minutes.
+This is a lower cost approach for smaller teams requiring more stringent controls without allocating a lot of budget, as the main resource for this kind of verification is only github action runner minutes.
+
+This project was created with Google Antigravity and Claude Code.
 
 ---
 
@@ -28,14 +30,13 @@ When a developer runs `git commit` or `git merge`:
 1. Consumes `.git/POW_PASSED` — aborts if it is absent (bypass detected).
 2. Constructs a **tri-factor signing payload**: `tree_hash|session_id|status`.
 3. Digitally signs the payload with the developer's **SSH private key** (RSA, Ed25519, Ed448, or ECDSA — auto-detected from `ssh -G github.com` or `POW_SSH_KEY_OVERRIDE`).
-4. Injects three Git trailers:
-   - `Validated-At-Local: <base64 signature>`
-   - `PoW-Session: <UUID>`
-   - `PoW-Status: PASSED`
+4. Bundles all attestation metadata and the signature into a Base64 encoded JSON string.
+5. Injects a single Git trailer:
+   - `PoW-Checks: <base64 JSON string>`
 
 ### Layer 3 — The Gatekeeper (GitHub Actions / `pre-receive`)
 When code is pushed:
-1. Extracts all three trailers from each new commit.
+1. Extracts the `PoW-Checks` trailer from each new commit.
 2. Reconstructs the tri-factor payload and verifies the signature against the committer's **SSH public keys registered on GitHub** (fetched live via the GitHub API).
 3. Optionally cross-references the GitHub Artifacts API to confirm a `PASSED` attestation artifact exists for the session UUID.
 4. Rejects and force-reverts any commits that fail either check.
@@ -97,7 +98,17 @@ The key used for signing must be [registered on the developer's GitHub account](
 
 No developer public keys need to be stored as secrets — they are resolved at runtime from each committer's GitHub profile.
 
-### 4. Developer `.env` Configuration
+### 4. GitHub Workflow Setup (`POW_CHECKS_CMD`)
+
+The server-side validator cryptographically strictly enforces that the developer ran the *exact* required checks.
+In `.github/workflows/pow-validator.yml` and `.github/workflows/pow-ledger.yml`, ensure the `POW_CHECKS_CMD` environment variable is defined and matches the client's command string literally:
+
+```yaml
+env:
+  POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
+```
+
+### 5. Developer `.env` Configuration
 
 ```env
 # Command to run before signing (e.g., linters, secret scanners)

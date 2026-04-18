@@ -67,10 +67,11 @@ if os.path.exists(passed_flag):
 
     session_id = session_data["session_id"]
     status = session_data["status"]
+    pow_checks_hash = session_data.get("pow_checks_hash", "")
 
     try:
         tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
-        sign_payload = f"{tree_hash}|{session_id}|{status}"
+        sign_payload = f"{pow_checks_hash}|{tree_hash}|{session_id}|{status}"
 
         key_path = find_ssh_key()
         if not key_path:
@@ -80,6 +81,14 @@ if os.path.exists(passed_flag):
 
         signature = sign_with_key(private_key, sign_payload.encode())
         token = base64.b64encode(signature).decode()
+        
+        bundle = json.dumps({
+            "token": token,
+            "session": session_id,
+            "status": status,
+            "checks_hash": pow_checks_hash
+        })
+        pow_checks = base64.b64encode(bundle.encode()).decode()
 
         # Strip comment lines (e.g., from MERGE_MSG) before injecting trailers.
         # Without this, git interpret-trailers appends trailers after comments;
@@ -94,9 +103,7 @@ if os.path.exists(passed_flag):
 
         subprocess.check_call([
             "git", "interpret-trailers", "--in-place",
-            "--trailer", f"Validated-At-Local: {token}",
-            "--trailer", f"PoW-Session: {session_id}",
-            "--trailer", f"PoW-Status: {status}",
+            "--trailer", f"PoW-Checks: {pow_checks}",
             msg_file
         ])
     except Exception as e:

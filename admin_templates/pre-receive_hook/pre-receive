@@ -12,6 +12,7 @@ import subprocess
 import os
 import base64
 import json
+import hashlib
 import urllib.request
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
@@ -85,6 +86,9 @@ def verify_with_github_keys(sig_raw, payload_bytes, username, token, api_base):
 # ---------------------------------------------------------------------------
 
 def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
+    expected_cmd = os.environ.get("POW_CHECKS_CMD", "none")
+    expected_hash = hashlib.sha256(expected_cmd.encode()).hexdigest()
+    
     cmd = ["git", "log", f"{old_rev}..{new_rev}", "--format=%H"]
     try:
         output = subprocess.check_output(cmd).decode().strip()
@@ -96,21 +100,9 @@ def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
 
     commits = output.splitlines()
     for commit_hash in commits:
-        token = subprocess.check_output([
+        pow_checks_b64 = subprocess.check_output([
             "git", "log", "-1",
-            "--format=%(trailers:key=Validated-At-Local,valueonly)",
-            commit_hash
-        ]).decode().strip()
-
-        session = subprocess.check_output([
-            "git", "log", "-1",
-            "--format=%(trailers:key=PoW-Session,valueonly)",
-            commit_hash
-        ]).decode().strip()
-
-        status = subprocess.check_output([
-            "git", "log", "-1",
-            "--format=%(trailers:key=PoW-Status,valueonly)",
+            "--format=%(trailers:key=PoW-Checks,valueonly)",
             commit_hash
         ]).decode().strip()
 
@@ -118,11 +110,26 @@ def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
             "git", "log", "-1", "--format=%T", commit_hash
         ]).decode().strip()
 
-        if not token or not session or not status:
-            print(f"❌ Commit {commit_hash} is missing required trailers.")
+        if not pow_checks_b64:
+            print(f"❌ Commit {commit_hash} is missing required PoW-Checks trailer.")
+            return False
+            
+        try:
+            bundle_json = base64.b64decode(pow_checks_b64).decode()
+            bundle = json.loads(bundle_json)
+            token = bundle["token"]
+            session = bundle["session"]
+            status = bundle["status"]
+            cmd_hash = bundle["checks_hash"]
+        except Exception:
+            print(f"❌ Commit {commit_hash} PoW-Checks trailer is not valid base64 JSON.")
+            return False
+            
+        if cmd_hash != expected_hash:
+            print(f"❌ Commit {commit_hash} used incorrect POW_CHECKS_CMD (hash mismatch).")
             return False
 
-        sign_payload = f"{tree_hash}|{session}|{status}"
+        sign_payload = f"{cmd_hash}|{tree_hash}|{session}|{status}"
 
         try:
             sig_raw = base64.b64decode(token)
