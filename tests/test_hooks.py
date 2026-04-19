@@ -309,7 +309,7 @@ class TestGitHubSSHMode(unittest.TestCase):
         self.assertTrue(bundle.get("checks_hash"))
 
     def test_signature_is_valid_ed25519(self):
-        """The Validated-At-Local signature in the bundle must be verifiable with the test key."""
+        """The token signature in the PoW-Checks bundle must be verifiable with the test key."""
         with open("b.txt", "w") as f:
             f.write("world")
         subprocess.check_call(["git", "add", "b.txt"])

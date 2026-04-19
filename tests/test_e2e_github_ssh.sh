@@ -111,7 +111,11 @@ cp admin_templates/github/scripts/verify_pow.py  .github/scripts/
 # signature verification issues (avoids YAML heredoc / << merge-key problems).
 cat > .github/scripts/e2e_debug.py << 'PYEOF'
 #!/usr/bin/env python3
-"""Diagnostic: verify the signed commit from inside the act container."""
+"""Diagnostic: verify the signed commit from inside the act container.
+
+Extracts the unified PoW-Checks trailer (base64 JSON bundle) and
+verifies the embedded signature against the mock GitHub API keys.
+"""
 import subprocess, base64, urllib.request, json, os, sys
 from cryptography.hazmat.primitives import serialization
 
@@ -120,9 +124,18 @@ def gitout(*args):
 
 commit = gitout("log", "-1", "--format=%H")
 tree   = gitout("log", "-1", "--format=%T", commit)
-tok    = gitout("log", "-1", "--format=%(trailers:key=Validated-At-Local,valueonly)", commit)
-sess   = gitout("log", "-1", "--format=%(trailers:key=PoW-Session,valueonly)", commit)
-stat   = gitout("log", "-1", "--format=%(trailers:key=PoW-Status,valueonly)", commit)
+
+# Extract the unified PoW-Checks trailer (base64-encoded JSON bundle)
+pow_checks_b64 = gitout("log", "-1", "--format=%(trailers:key=PoW-Checks,valueonly)", commit)
+if not pow_checks_b64:
+    print("[e2e_debug] ERROR: No PoW-Checks trailer found")
+    sys.exit(1)
+
+bundle = json.loads(base64.b64decode(pow_checks_b64))
+tok  = bundle["token"]
+sess = bundle["session"]
+stat = bundle["status"]
+
 payload = f"{tree}|{sess}|{stat}"
 print(f"[e2e_debug] tree={tree}")
 print(f"[e2e_debug] session={sess}")
@@ -269,15 +282,6 @@ git add valid.txt
 git commit -m "feat: valid signed commit"
 SIGNED_COMMIT=$(git rev-parse HEAD)
 
-# Debug: does the test key match the signature in the commit?
-echo "--- DEBUG: key match check ---"
-$PYTHON "$SCRIPT_DIR/test_e2e_key_debug.py"
-echo "--- END DEBUG ---"
-
-# Also verify directly using the PUBLIC key on the host
-echo "--- DEBUG: host public-key verification ---"
-$PYTHON "$SCRIPT_DIR/test_e2e_pubkey_verify.py"
-echo "--- END DEBUG ---"
 
 # Build secrets/env file for act
 cat > .secrets <<EOF
