@@ -2,32 +2,89 @@
 """
 PoW-Hook Pre-Receive Hook (GitHub Enterprise / Self-Hosted)
 
-Verifies the tri-factor RSA signature (tree_hash|session_id|status) on every
-commit in a push.  This is the offline equivalent of verify_pow.py — it does
-NOT query the GitHub Artifacts API because it runs on the server itself.
+Verifies the Ed25519/RSA SSH signature (tree_hash|session_id|status) on every
+commit in a push against the committer's registered GitHub SSH keys.
+This is the server-side equivalent of verify_pow.py — it does NOT query the
+GitHub Artifacts API because it runs on the server itself.
 """
 import sys
 import subprocess
 import os
 import base64
 import json
+import urllib.request
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 
 
-def verify_push(old_rev, new_rev):
-    keys_json = os.environ.get("POW_PUBLIC_KEYS", "{}")
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def github_api_request(path, token, api_base):
+    """Make an authenticated GET request to the GitHub API."""
+    url = f"{api_base.rstrip('/')}/{path.lstrip('/')}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+    })
+    resp = urllib.request.urlopen(req)
+    return json.loads(resp.read().decode())
+
+
+# ---------------------------------------------------------------------------
+# GitHub SSH Key Verification
+# ---------------------------------------------------------------------------
+
+def get_github_ssh_keys(username, token, api_base):
+    """Fetch the SSH public keys registered on a GitHub user's account."""
     try:
-        public_keys = json.loads(keys_json)
-    except json.JSONDecodeError:
-        print("❌ Server error: POW_PUBLIC_KEYS environment variable is not valid JSON.")
+        data = github_api_request(f"/users/{username}/keys", token, api_base)
+        return [k["key"] for k in data]
+    except Exception as e:
+        print(f"   ⚠️  Could not fetch SSH keys for {username}: {e}")
+        return []
+
+
+def verify_with_github_keys(sig_raw, payload_bytes, username, token, api_base):
+    """
+    Try every SSH key registered on GitHub for username.
+    Supports RSA (PKCS1v15/SHA-256) and Ed25519.
+    Returns True if any key matches.
+    """
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    ssh_keys = get_github_ssh_keys(username, token, api_base)
+    if not ssh_keys:
         return False
 
-    if not public_keys:
-        print("❌ Server error: No public keys configured in POW_PUBLIC_KEYS.")
-        return False
+    from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PublicKey
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey, ECDSA
 
+    for key_str in ssh_keys:
+        try:
+            pub_key = serialization.load_ssh_public_key(key_str.encode())
+            if isinstance(pub_key, RSAPublicKey):
+                pub_key.verify(sig_raw, payload_bytes, padding.PKCS1v15(), hashes.SHA256())
+            elif isinstance(pub_key, (Ed25519PublicKey, Ed448PublicKey)):
+                pub_key.verify(sig_raw, payload_bytes)
+            elif isinstance(pub_key, EllipticCurvePublicKey):
+                pub_key.verify(sig_raw, payload_bytes, ECDSA(hashes.SHA256()))
+            else:
+                continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Push verification
+# ---------------------------------------------------------------------------
+
+def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
     cmd = ["git", "log", f"{old_rev}..{new_rev}", "--format=%H"]
     try:
         output = subprocess.check_output(cmd).decode().strip()
@@ -65,7 +122,6 @@ def verify_push(old_rev, new_rev):
             print(f"❌ Commit {commit_hash} is missing required trailers.")
             return False
 
-        # Reconstruct the tri-factor signing payload
         sign_payload = f"{tree_hash}|{session}|{status}"
 
         try:
@@ -74,41 +130,45 @@ def verify_push(old_rev, new_rev):
             print(f"❌ Signature for commit {commit_hash} is not valid base64.")
             return False
 
-        valid = False
-        for user, pub_key_pem in public_keys.items():
-            try:
-                public_key = serialization.load_pem_public_key(pub_key_pem.encode())
-                public_key.verify(
-                    sig_raw,
-                    sign_payload.encode(),
-                    padding.PKCS1v15(),
-                    hashes.SHA256()
-                )
-                valid = True
-                print(f"✅ Commit {commit_hash} verified by {user}'s key.")
-                break
-            except Exception:
-                continue
-
-        if not valid:
-            print(f"❌ RSA Signature mismatch for commit {commit_hash}.")
+        if not gh_token:
+            print("❌ Server error: POW_GITHUB_TOKEN is required for GitHub SSH key mode.")
+            return False
+        if not pusher:
+            print("❌ Server error: GITHUB_USER_LOGIN is not set — cannot resolve pusher's SSH keys.")
+            return False
+        valid = verify_with_github_keys(sig_raw, sign_payload.encode(), pusher, gh_token, api_base)
+        if valid:
+            print(f"✅ Commit {commit_hash} verified via GitHub SSH keys of {pusher}.")
+        else:
+            print(f"❌ No matching GitHub SSH key for commit {commit_hash} (pusher: {pusher}).")
             return False
 
     return True
 
 
 def main():
-    for line in sys.stdin:
+    # GitHub Enterprise injects the pusher's login and the API base URL.
+    gh_token  = os.environ.get("POW_GITHUB_TOKEN")
+    api_base  = os.environ.get("POW_GITHUB_API_URL", "https://api.github.com")
+    pusher    = os.environ.get("GITHUB_USER_LOGIN")
+
+    # Read the first ref to determine config (all refs in a single push share a repo).
+    lines = sys.stdin.read().strip().splitlines()
+    if not lines:
+        sys.exit(0)
+
+    for line in lines:
         old, new, ref = line.split()
         if new == "0000000000000000000000000000000000000000":
             continue
 
-        if not verify_push(old, new):
+        if not verify_push(old, new, gh_token, api_base, pusher):
             print("-------------------------------------------------------")
             print("REJECTED: One or more commits bypassed local hooks.")
             print("Please install the project hooks and re-commit.")
             print("-------------------------------------------------------")
             sys.exit(1)
+
     sys.exit(0)
 
 
