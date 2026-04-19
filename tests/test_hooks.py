@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 # Helpers shared across test classes
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _free_port():
@@ -49,6 +49,9 @@ def _make_mock_api_server(pub_key_ssh: str, port: int):
             elif "/actions/artifacts" in self.path:
                 # Simulate a found attestation so check_attestation_artifact returns True
                 body = json.dumps({"total_count": 1, "artifacts": [{"id": 1}]}).encode()
+            elif "/pulls" in self.path:
+                # Mock PR listing endpoint
+                body = json.dumps([]).encode()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -58,6 +61,14 @@ def _make_mock_api_server(pub_key_ssh: str, port: int):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_PATCH(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def do_POST(self):
+            self.send_response(200)
+            self.end_headers()
 
         def log_message(self, *_):
             pass
@@ -211,7 +222,7 @@ class TestGitHubSSHMode(unittest.TestCase):
         self._set_env("GITHUB_USER_LOGIN", "test_user")
 
         # Initialise git repo
-        subprocess.check_call(["git", "init"])
+        subprocess.check_call(["git", "init", "-b", "main"])
         subprocess.check_call(["git", "config", "user.name", "Test User"])
         subprocess.check_call(["git", "config", "user.email", "test@example.com"])
 
@@ -282,33 +293,41 @@ class TestGitHubSSHMode(unittest.TestCase):
 
     # --------------------------------------------------------------- tests
 
-    def test_commit_produces_all_three_trailers(self):
-        """A normal commit in github mode must carry the tri-factor trailers."""
+    def test_commit_produces_single_trailer(self):
+        """A normal commit in github mode must carry the single PoW-Checks trailer."""
         with open("a.txt", "w") as f:
             f.write("hello")
         subprocess.check_call(["git", "add", "a.txt"])
         subprocess.check_call(["git", "commit", "-m", "feat: add a"])
 
-        self.assertTrue(self._trailer("Validated-At-Local"))
-        self.assertTrue(self._trailer("PoW-Session"))
-        self.assertEqual(self._trailer("PoW-Status"), "PASSED")
+        pow_checks_b64 = self._trailer("PoW-Checks")
+        self.assertTrue(pow_checks_b64)
+        bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
+        self.assertTrue(bundle.get("token"))
+        self.assertTrue(bundle.get("session"))
+        self.assertEqual(bundle.get("status"), "PASSED")
+        self.assertTrue(bundle.get("checks_hash"))
 
     def test_signature_is_valid_ed25519(self):
-        """The Validated-At-Local trailer must be verifiable with the test key."""
+        """The Validated-At-Local signature in the bundle must be verifiable with the test key."""
         with open("b.txt", "w") as f:
             f.write("world")
         subprocess.check_call(["git", "add", "b.txt"])
         subprocess.check_call(["git", "commit", "-m", "feat: add b"])
 
-        token   = self._trailer("Validated-At-Local")
-        session = self._trailer("PoW-Session")
-        status  = self._trailer("PoW-Status")
-        tree    = subprocess.check_output(
+        pow_checks_b64 = self._trailer("PoW-Checks")
+        bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
+
+        token     = bundle["token"]
+        session   = bundle["session"]
+        status    = bundle["status"]
+        cmd_hash  = bundle["checks_hash"]
+        tree      = subprocess.check_output(
             ["git", "log", "-1", "--format=%T"]
         ).decode().strip()
 
         sig_raw = base64.b64decode(token)
-        payload = f"{tree}|{session}|{status}".encode()
+        payload = f"{cmd_hash}|{tree}|{session}|{status}".encode()
         pub = self._ed_priv.public_key()
         pub.verify(sig_raw, payload)   # raises on failure
 
@@ -322,16 +341,18 @@ class TestGitHubSSHMode(unittest.TestCase):
 
         # git log --format=%(trailers:...) may emit blank lines between commits
         raw = subprocess.check_output([
-            "git", "log", "-2", "--format=%(trailers:key=PoW-Session,valueonly)"
+            "git", "log", "-2", "--format=%(trailers:key=PoW-Checks,valueonly)"
         ]).decode()
-        sessions = [s for s in raw.splitlines() if s.strip()]
+        blobs = [s for s in raw.splitlines() if s.strip()]
+        self.assertEqual(len(blobs), 2)
+        sessions = [json.loads(base64.b64decode(b).decode())["session"] for b in blobs]
         self.assertEqual(len(sessions), 2)
         self.assertNotEqual(sessions[0], sessions[1])
         self.assertEqual(len(sessions[0]), 36)
         self.assertEqual(sessions[0].count("-"), 4)
 
-    def test_merge_commit_carries_trailers(self):
-        """A --no-ff merge commit must also have tri-factor trailers."""
+    def test_merge_commit_carries_single_trailer(self):
+        """A --no-ff merge commit must also have the single trailer."""
         with open("base.txt", "w") as f:
             f.write("base")
         subprocess.check_call(["git", "add", "base.txt"])
@@ -343,14 +364,18 @@ class TestGitHubSSHMode(unittest.TestCase):
         subprocess.check_call(["git", "add", "feat.txt"])
         subprocess.check_call(["git", "commit", "-m", "feat: feature"])
 
-        subprocess.check_call(["git", "checkout", "master"])
+        subprocess.check_call(["git", "checkout", "main"])
         # Use GIT_EDITOR=true so git auto-accepts the merge message without
         # the -m flag; -m bypasses commit-msg on some git versions.
         env = {**os.environ, "GIT_EDITOR": "true"}
         subprocess.check_call(["git", "merge", "--no-ff", "feature"], env=env)
 
-        self.assertTrue(self._trailer("Validated-At-Local"))
-        self.assertEqual(self._trailer("PoW-Status"), "PASSED")
+        pow_checks_b64 = self._trailer("PoW-Checks")
+        self.assertTrue(pow_checks_b64)
+        bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
+        self.assertTrue(bundle.get("token"))
+        self.assertEqual(bundle.get("status"), "PASSED")
+        self.assertTrue(bundle.get("checks_hash"))
 
     def test_pre_receive_accepts_valid_signature(self):
         """pre-receive must pass when commits carry valid GitHub SSH signatures."""

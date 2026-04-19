@@ -2,15 +2,17 @@
 # ---------------------------------------------------------------------------
 # Run the unit test suite inside a Docker container (Linux environment).
 # Required because git hooks with Python shebangs only execute correctly on Linux.
-# Usage: bash run_tests.sh
+# Usage: bash tests/run_tests_windows.sh
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Convert to a Windows-style drive path (C:/...) for the Docker -v mount.
-# Git Bash would otherwise convert /work into C:/Program Files/Git/work.
-WIN_DIR="$(cygpath -w "$SCRIPT_DIR" 2>/dev/null | sed 's|\\|/|g')"
-[ -z "$WIN_DIR" ] && WIN_DIR="$SCRIPT_DIR"   # fallback on non-Windows
+# Convert to a Windows-style drive path (C:/...) for the Docker -v mount if on Windows.
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+    WIN_DIR="$(cygpath -w "$SCRIPT_DIR" | sed 's|\\|/|g')"
+else
+    WIN_DIR="$SCRIPT_DIR"
+fi
 
 echo "🐳 Running unit tests inside Docker (ubuntu:22.04)..."
 MSYS_NO_PATHCONV=1 docker run --rm \

@@ -32,4 +32,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POW_ADMIN_HANDLES: ${{ secrets.POW_ADMIN_HANDLES }}
           POW_GITHUB_API_URL: ${{ secrets.POW_GITHUB_API_URL }}
+          POW_CHECKS_CMD: 'none' # The expected custom checks command value or "none"
         run: python3 .github/scripts/verify_pow.py

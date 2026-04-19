@@ -6,6 +6,7 @@ import uuid
 import json
 import urllib.request
 import urllib.error
+import hashlib
 
 def load_env():
     try:
@@ -22,7 +23,7 @@ def load_env():
     except Exception:
         pass
 
-def dispatch_attestation(session_id, tree_hash, state):
+def dispatch_attestation(session_id, tree_hash, state, pow_checks_hash):
     """Fire a workflow_dispatch event to the PoW Attestation Ledger."""
     pat = os.environ.get("GITHUB_PAT_LOCAL")
     repo = os.environ.get("POW_GITHUB_REPO")
@@ -37,6 +38,7 @@ def dispatch_attestation(session_id, tree_hash, state):
         "inputs": {
             "session_id": session_id,
             "tree_hash": tree_hash,
+            "pow_checks_hash": pow_checks_hash,
             "state": state,
         }
     }).encode()
@@ -75,16 +77,21 @@ if __name__ == "__main__":
     session_id = str(uuid.uuid4())
     tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
 
-    dispatch_attestation(session_id, tree_hash, "STARTED")
+    check_cmd = os.environ.get("POW_CHECKS_CMD", "").strip()
+    if not check_cmd:
+        check_cmd = "none"
+    pow_checks_hash = hashlib.sha256(check_cmd.encode()).hexdigest()
+
+    dispatch_attestation(session_id, tree_hash, "STARTED", pow_checks_hash)
 
     passed = run_custom_checks()
 
     status = "PASSED" if passed else "FAILED"
-    dispatch_attestation(session_id, tree_hash, status)
+    dispatch_attestation(session_id, tree_hash, status, pow_checks_hash)
 
     if passed:
         with open(".git/POW_PASSED", "w") as f:
-            json.dump({"session_id": session_id, "status": status}, f)
+            json.dump({"session_id": session_id, "status": status, "pow_checks_hash": pow_checks_hash}, f)
         sys.exit(0)
     else:
         print("❌ Quality checks failed. Merge aborted.")

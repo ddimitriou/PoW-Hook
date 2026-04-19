@@ -58,10 +58,12 @@ def main():
 
     server = http.server.HTTPServer(("0.0.0.0", port), Handler)
 
-    # Allow callers to kill us gracefully
+    # Terminate immediately on SIGTERM / SIGINT.
+    # server.shutdown() must NOT be called from a signal handler: it blocks
+    # waiting for serve_forever() to exit, but serve_forever() is paused
+    # while the signal handler runs → deadlock.  os._exit() is safe here.
     def _shutdown(sig, frame):
-        server.shutdown()
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

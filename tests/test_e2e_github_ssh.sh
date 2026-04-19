@@ -18,8 +18,14 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-PYTHON="${PYTHON:-/c/Users/sfitsos/Projects/PoW-Hook/.venv/Scripts/python.exe}"
-ACT="${ACT:-/c/Users/sfitsos/bin/act.exe}"
+# Use the project's virtual environment if available, otherwise fallback to system python
+VENV_PYTHON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python"
+if [ -f "$VENV_PYTHON" ]; then
+    PYTHON="$VENV_PYTHON"
+else
+    PYTHON="${PYTHON:-python3}"
+fi
+ACT="${ACT:-act}"
 
 echo "🔍 Checking prerequisites..."
 command -v "$ACT" >/dev/null 2>&1 || { echo "❌ 'act' not found. Install from https://github.com/nektos/act"; exit 1; }
@@ -27,27 +33,31 @@ command -v docker >/dev/null 2>&1 || { echo "❌ Docker not found."; exit 1; }
 $PYTHON -c "import cryptography" 2>/dev/null || { echo "❌ cryptography package not installed for $PYTHON"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PRJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
 MOCK_PORT=18080
 MOCK_PID=""
 
 kill_port() {
     local port="$1"
-    # Windows: kill ALL processes listening on the port (loop until port is free)
-    for attempt in 1 2 3; do
-        powershell -noprofile -command "
-\$conns = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue
-\$pids  = \$conns | Select-Object -ExpandProperty OwningProcess | Sort-Object -Unique
-\$pids | ForEach-Object { Stop-Process -Id \$_ -Force -ErrorAction SilentlyContinue }
-" 2>/dev/null || true
-        sleep 0.3
-        # Check if port is free now
-        if ! powershell -noprofile -command "
-Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count
-" 2>/dev/null | grep -q "^[1-9]"; then
-            break
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+        # Windows: kill ALL processes listening on the port
+        for attempt in 1 2 3; do
+            powershell -noprofile -command "
+    \$conns = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue
+    \$pids  = \$conns | Select-Object -ExpandProperty OwningProcess | Sort-Object -Unique
+    \$pids | ForEach-Object { Stop-Process -Id \$_ -Force -ErrorAction SilentlyContinue }
+    " 2>/dev/null || true
+            sleep 0.3
+        done
+    else
+        # Unix-like: use lsof or fuser
+        if command -v lsof >/dev/null; then
+            lsof -ti :"$port" | xargs kill -9 2>/dev/null || true
+        elif command -v fuser >/dev/null; then
+            fuser -k "$port"/tcp 2>/dev/null || true
         fi
-    done
+    fi
 }
 
 cleanup() {
@@ -76,10 +86,10 @@ echo "✅ Keypair at $KEY_PATH"
 # ---------------------------------------------------------------------------
 echo "📦 Initialising test repository..."
 cd "$TEST_DIR"
-cp -r "$SCRIPT_DIR"/hooks_templates .
-cp -r "$SCRIPT_DIR"/admin_templates .
-cp "$SCRIPT_DIR"/setup_hooks.py .
-cp "$SCRIPT_DIR"/.env.example .
+cp -r "$PRJ_ROOT"/hooks_templates .
+cp -r "$PRJ_ROOT"/admin_templates .
+cp "$PRJ_ROOT"/setup_hooks.py .
+cp "$PRJ_ROOT"/.env.example .
 
 git init
 git config user.name  "E2E Test"
@@ -165,7 +175,12 @@ WORKFLOW
 echo "🔧 Installing PoW hooks..."
 # Convert key path to Windows-native format so Windows Python can find the file
 # regardless of how environment variables are passed through the git hook chain.
-KEY_PATH_WIN=$(cygpath -w "$KEY_PATH" 2>/dev/null | tr '\\' '/' || echo "$KEY_PATH")
+# Convert key path to Windows-native format if on Windows
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+    KEY_PATH_WIN=$(cygpath -w "$KEY_PATH" | tr '\\' '/')
+else
+    KEY_PATH_WIN="$KEY_PATH"
+fi
 export POW_SSH_KEY_OVERRIDE="$KEY_PATH_WIN"
 export PYTHONUTF8=1       # prevent cp1252 encode errors on Windows
 echo "   POW_SSH_KEY_OVERRIDE=$POW_SSH_KEY_OVERRIDE"
