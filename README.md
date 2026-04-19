@@ -1,15 +1,15 @@
 # PoW-Hook: Proof-of-Work Git Validator
 
 [![CI](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml/badge.svg)](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml)
-**PoW-Hook** is an autonomous "Proof of Work" validation system for Git repositories. It cryptographically guarantees that no code enters your remote repository unless it has legitimately passed your local quality, linting, or security checks.
+**PoW-Hook** is an autonomous "Proof of Work" validation system for Github repositories. It cryptographically guarantees that no code enters your remote repository unless it has legitimately passed your local quality, linting, or security checks.
+
+The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the [Github Advanced Security] product, which runs a pre-receive hook server side and block everything before it hits the git ledger. The intent was to develop an easy way to prevent at-scale developer from committing secrets and then accidentally push them into Github.
 
 This reliably defeats developers bypassing rules with `git commit --no-verify`, deleting their `.git/hooks` folder, or skipping local tests — even malicious insiders.
 
-The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the github advanced security product, which runs a pre-receive hook server side and block everything before it hits the git ledger.
+It is a lower cost approach for smaller teams requiring more stringent controls without allocating a lot of budget, as the main resource for this kind of verification is only Github Action Runner (SaaS) minutes.
 
-This is a lower cost approach for smaller teams requiring more stringent controls without allocating a lot of budget, as the main resource for this kind of verification is only github action runner minutes.
-
-This project was created with Google Antigravity and Claude Code.
+This project was created with [Google Antigravity](https://antigravity.google/) and [Claude Code](https://claude.com/product/claude-code).
 
 ---
 
@@ -44,6 +44,8 @@ The correct algorithm is chosen automatically at runtime based on the key loaded
 
 Run once per repository to choose the enforcement backend. You can pass an optional target directory to install the configuration in a different project.
 
+Add in your desired `POW_CHECKS_CMD` command that runs the checks you need to perform (the default is `trufflehog`).
+
 ```bash
 python3 admin_install.py [TARGET_DIR]
 ```
@@ -51,18 +53,21 @@ python3 admin_install.py [TARGET_DIR]
 - **Option 1 — GitHub Actions**: Scaffolds `.github/workflows/` and `.github/scripts/` from `admin_templates/github/`.
 - **Option 2 — GitHub Enterprise**: Deploys the `pre-receive` hook from `admin_templates/pre-receive_hook/`.
 
-Both options write a `.pow-config.json` file that the local hooks read to determine verification mode. Commit this file to the repository.
+Both options write a `.pow-config.json` file that the local hooks read to determine verification mode. Commit this file to the repository, and push it to the remote.
 
 ### 2. Developer Onboarding
 
-Each developer installs the local hooks in their repository. You can pass an optional target repository path.
+Modify the `.env.sample` file and add in your desired `POW_CHECKS_CMD` command which should be the same as in the `Administration Setup` step.
+
+
+For each developer this should be installed locally in their repository. You can pass an optional target repository path. 
 
 ```bash
 ./install.sh [TARGET_REPO]
 ```
 
 This will:
-- Detect the SSH private key used for GitHub (`ssh -G github.com`) — no new key is generated.
+- Detect the SSH private key used for GitHub (`ssh -G github.com`).
 - Create a Python virtual environment (`.venv/`).
 - Install `pre-commit`, `commit-msg`, and `pre-merge-commit` hooks with the correct interpreter path.
 
@@ -87,6 +92,8 @@ In `.github/workflows/pow-validator.yml` and `.github/workflows/pow-ledger.yml`,
 env:
   POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
 ```
+
+We're using [trufflehog](https://github.com/trufflesecurity/trufflehog) as the sample secret key search mechanism.
 
 ### 5. Developer `.env` Configuration
 
