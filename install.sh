@@ -14,19 +14,19 @@ if [ ! -f "$TARGET_REPO/.env" ]; then
     cp "$SCRIPT_DIR/.env.example" "$TARGET_REPO/.env"
 fi
 
-# Setup standard virtual environment
-if [ ! -d ".venv" ]; then
-    echo "🐍 Creating standard Python virtual environment in .venv..."
-    python3 -m venv .venv
+# Use the central venv Python if it already exists (created by admin_install.py),
+# otherwise fall back to system python3.  setup_hooks.py will create the central
+# venv and install cryptography if it is not yet present.
+CENTRAL_PYTHON="$HOME/.pow-hook/venv/bin/python3"
+if [ -f "$CENTRAL_PYTHON" ]; then
+    PYTHON="$CENTRAL_PYTHON"
+else
+    PYTHON="python3"
 fi
-source .venv/bin/activate
-pip install cryptography 2>/dev/null || true
 
-# Run python install script
-python3 "$SCRIPT_DIR/setup_hooks.py" "$TARGET_REPO"
+"$PYTHON" "$SCRIPT_DIR/setup_hooks.py" "$TARGET_REPO"
 
 echo ""
 echo "--------------------------------------------------------"
 echo "🎉 Installation complete."
-echo "⚠️  IMPORTANT: Please share your Public Key with your repository admin to authorize your pushes!"
 echo "--------------------------------------------------------"
