@@ -15,12 +15,12 @@ jobs:
       actions: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Python environment
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -32,5 +32,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POW_ADMIN_HANDLES: ${{ secrets.POW_ADMIN_HANDLES }}
           POW_GITHUB_API_URL: ${{ secrets.POW_GITHUB_API_URL }}
-          POW_CHECKS_CMD: 'none' # The expected custom checks command value or "none"
+          POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
         run: python3 .github/scripts/verify_pow.py

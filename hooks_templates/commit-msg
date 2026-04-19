@@ -15,13 +15,35 @@ msg_file = sys.argv[1]
 passed_flag = ".git/POW_PASSED"
 
 
+def load_env():
+    try:
+        repo_root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
+        env_path = os.path.join(repo_root, ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if "=" in line and not line.strip().startswith("#"):
+                        key, val = line.strip().split("=", 1)
+                        val = val.strip().strip("'\"")
+                        if key not in os.environ:
+                            os.environ[key] = val
+    except Exception:
+        pass
+
+
 def find_ssh_key():
     """Return the SSH private key path used for github.com connections."""
-    # Test/CI override — skips ssh -G detection entirely
+    # Priority 1: Specifically configured key from setup
+    env_key = os.environ.get("POW_SSH_KEY")
+    if env_key and os.path.exists(env_key):
+        return env_key
+
+    # Priority 2: Test/CI override
     override = os.environ.get("POW_SSH_KEY_OVERRIDE")
     if override and os.path.exists(override):
         return override
 
+    # Priority 3: Resolve via ssh -G
     try:
         out = subprocess.check_output(
             ["ssh", "-G", "github.com"], stderr=subprocess.DEVNULL
@@ -33,6 +55,8 @@ def find_ssh_key():
                     return path
     except Exception:
         pass
+
+    # Priority 4: Default candidates
     for candidate in ["~/.ssh/id_rsa", "~/.ssh/id_ed25519", "~/.ssh/id_ecdsa"]:
         path = os.path.expanduser(candidate)
         if os.path.exists(path):
@@ -59,6 +83,8 @@ def sign_with_key(private_key, payload_bytes):
         return private_key.sign(payload_bytes, ECDSA(hashes.SHA256()))
     raise ValueError(f"Unsupported key type: {type(private_key).__name__}")
 
+
+load_env()
 
 if os.path.exists(passed_flag):
     with open(passed_flag, "r") as f:
