@@ -138,9 +138,19 @@ def check_attestation_artifact(repo, session_id, expected_hash, gh_token, retrie
 # ---------------------------------------------------------------------------
 
 def main():
+    # POW_ENFORCE is set in the workflow YAML (not a secret).  It ships as
+    # "false" so the initial push that installs the workflow files passes
+    # without errors.  Change it to "true" on the second commit (made with
+    # hooks installed and running) to enable enforcement for all future pushes.
+    if os.environ.get("POW_ENFORCE", "").strip().lower() != "true":
+        print("⚠️  POW_ENFORCE is not \"true\" — validation is disabled.")
+        print("   Set POW_ENFORCE: \"true\" in .github/workflows/pow-validator.yml")
+        print("   on your second commit (made with hooks installed and running).")
+        sys.exit(0)
+
     gh_token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")  # auto-set by Actions
-    
+
     expected_cmd = os.environ.get("POW_CHECKS_CMD", "none")
     expected_hash = hashlib.sha256(expected_cmd.encode()).hexdigest()
 

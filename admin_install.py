@@ -6,9 +6,11 @@ import sys
 
 POW_CONFIG_FILE = ".pow-config.json"
 
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ADMIN_TEMPLATES = os.path.join(SCRIPT_DIR, "admin_templates")
+
+sys.path.insert(0, SCRIPT_DIR)
+from setup_hooks import ensure_central_venv
 
 
 def write_pow_config(key_source, target_dir):
@@ -62,6 +64,12 @@ def configure_github_enterprise(key_source, target_dir):
 
 def main():
     target_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+
+    print("🐍 Setting up central Python environment...")
+    if ensure_central_venv() is None:
+        print("❌ Failed to create central venv. Aborting.")
+        return
+
     print(f"Welcome to the PoW-Hook Administrator Setup! (Target: {target_dir})\n")
     print("1) GitHub Actions (Standard Cloud Deployment)")
     print("2) GitHub Enterprise Server (Self-Hosted 'pre-receive' Deployments)\n")

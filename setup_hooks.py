@@ -119,10 +119,7 @@ def ensure_central_venv():
     # Determine pip and python paths within venv
     suffix = ".exe" if os.name == "nt" else ""
     venv_python = os.path.join(CENTRAL_VENV_DIR, "Scripts" if os.name == "nt" else "bin", f"python{suffix}")
-    
-    print("pip" if os.name == "nt" else "pip3")
-    # Install/Update cryptography
-    print(f"pip" if os.name == "nt" else "pip3")
+
     print(f"📥 Ensuring 'cryptography' is installed in central venv...")
     try:
         subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip"], capture_output=True, check=True)

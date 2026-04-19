@@ -6,3 +6,4 @@ RUN apt-get update -qq && \
     git config --global init.defaultBranch master && \
     git config --global user.email "ci@test.com" && \
     git config --global user.name "CI"
+CMD ["python3", "-m", "pytest", "tests/test_hooks.py", "-v", "--tb=short"]

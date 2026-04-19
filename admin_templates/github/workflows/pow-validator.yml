@@ -33,4 +33,11 @@ jobs:
           POW_ADMIN_HANDLES: ${{ secrets.POW_ADMIN_HANDLES }}
           POW_GITHUB_API_URL: ${{ secrets.POW_GITHUB_API_URL }}
           POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
+          # ---------------------------------------------------------------
+          # POW_ENFORCE controls whether validation is active.
+          # Ships as "false" so the initial setup push passes without errors.
+          # Change to "true" on your second commit (made with hooks running)
+          # to enable enforcement for all future pushes.
+          # ---------------------------------------------------------------
+          POW_ENFORCE: "false"
         run: python3 .github/scripts/verify_pow.py

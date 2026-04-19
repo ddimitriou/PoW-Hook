@@ -73,7 +73,25 @@ This will:
 
 The key used for signing must be [registered on the developer's GitHub account](https://github.com/settings/keys). No manual public key exchange with the admin is needed — keys are fetched live from the GitHub API at verification time.
 
-### 3. GitHub Repository Secrets
+### 3. Bootstrap the Repository (two-commit setup)
+
+The validator runs on every push to `main`. The very first push — which delivers the workflow file itself — has no PoW trailers yet, so it would fail its own check. PoW-Hook handles this with a `POW_ENFORCE` flag embedded directly in the workflow YAML (not a repository secret), making it tamper-evident: changing it back to `"false"` would itself require passing enforcement.
+
+**Steps:**
+
+1. Run `admin_install.py` — it scaffolds `.github/workflows/pow-validator.yml` with `POW_ENFORCE: "false"`.
+2. Commit `.pow-config.json` and the `.github/` directory and push to `main` *(no hooks needed yet)*.
+3. Confirm the `verify-pow` workflow run succeeds and prints `⚠️ POW_ENFORCE is not "true" — validation is disabled`.
+4. Run `./install.sh` to install local hooks on every developer machine.
+5. Open `.github/workflows/pow-validator.yml`, change `POW_ENFORCE: "false"` → `POW_ENFORCE: "true"`, and commit **with hooks running** (this commit gets a valid PoW signature).
+6. Push — the validator now enforces signatures on every subsequent commit.
+
+From step 5 onward, every commit must carry a valid PoW signature.
+
+> [!NOTE]
+> **Why this is self-reinforcing:** `POW_ENFORCE` lives in the workflow file, not in repository secrets. Reverting it to `"false"` is itself a commit that must pass PoW validation — so enforcement cannot be silently disabled by anyone without leaving a traceable, signed commit in the repository history.
+
+### 4. GitHub Repository Secrets
 
 | Secret               | Description                                                         |
 |----------------------|---------------------------------------------------------------------|
@@ -83,7 +101,7 @@ The key used for signing must be [registered on the developer's GitHub account](
 
 No developer public keys need to be stored as secrets — they are resolved at runtime from each committer's GitHub profile.
 
-### 4. GitHub Workflow Setup (`POW_CHECKS_CMD`)
+### 5. GitHub Workflow Setup (`POW_CHECKS_CMD`)
 
 The server-side validator cryptographically strictly enforces that the developer ran the *exact* required checks.
 In `.github/workflows/pow-validator.yml` and `.github/workflows/pow-ledger.yml`, ensure the `POW_CHECKS_CMD` environment variable is defined and matches the client's command string literally:
@@ -95,7 +113,7 @@ env:
 
 We're using [trufflehog](https://github.com/trufflesecurity/trufflehog) as the sample secret key search mechanism.
 
-### 5. Developer `.env` Configuration
+### 6. Developer `.env` Configuration
 
 ```env
 # Command to run before signing (e.g., linters, secret scanners)
