@@ -25,7 +25,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
     ubuntu:22.04 bash -c '
         set -e
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq && apt-get install -y -qq python3 python3-pip git openssh-client 2>/dev/null
+        apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv git openssh-client 2>/dev/null
         pip3 install -q cryptography pytest 2>/dev/null
 
         git config --global init.defaultBranch master

@@ -6,6 +6,7 @@ hooks work correctly.  Do NOT run directly on Windows — use run_tests.sh.
 """
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -15,9 +16,11 @@ import base64
 import http.server
 import threading
 import socket
+import uuid as uuid_mod
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
+    Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -28,6 +31,23 @@ from cryptography.hazmat.primitives import hashes, serialization
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def decode_pow_trailer(b64_value):
+    """Decode a binary PoW-Checks trailer into (sig_raw, session_id, status, checks_hash_hex)."""
+    packed = base64.b64decode(b64_value)
+    if not packed or packed[0] != 0x01:
+        raise ValueError(f"Unknown PoW trailer version: {packed[0] if packed else 'empty'}")
+    sig_len = struct.unpack_from('>H', packed, 1)[0]
+    offset = 3
+    sig = packed[offset:offset + sig_len]
+    offset += sig_len
+    session_id = str(uuid_mod.UUID(bytes=packed[offset:offset + 16]))
+    offset += 16
+    status = 'PASSED' if packed[offset] == 1 else 'FAILED'
+    offset += 1
+    checks_hash = packed[offset:offset + 32].hex()
+    return sig, session_id, status, checks_hash
 
 
 def _free_port():
@@ -216,13 +236,9 @@ class TestGitHubSSHMode(unittest.TestCase):
         # Start mock GitHub API
         self._mock_port = _free_port()
         self._mock_server = _make_mock_api_server(self._pub_ssh, self._mock_port)
-
-        # Build POW JSON for hooks — ssh_key_override and github_api_url
-        pow_cfg = json.dumps({
-            "ssh_key_override": self._key_path,
-            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
-        }, separators=(',', ':'))
-        self._set_env("POW", pow_cfg)
+        self._set_env("POW_GITHUB_API_URL", f"http://127.0.0.1:{self._mock_port}")
+        self._set_env("POW_GITHUB_TOKEN", "test_token")
+        self._set_env("GITHUB_USER_LOGIN", "test_user")
 
         # Initialise git repo
         subprocess.check_call(["git", "init", "-b", "main"])
@@ -235,16 +251,20 @@ class TestGitHubSSHMode(unittest.TestCase):
         shutil.copy2(os.path.join(REPO_ROOT, "setup_hooks.py"), "setup_hooks.py")
         shutil.copy2(os.path.join(REPO_ROOT, ".env.example"), ".env.example")
 
+        # Write .pow-config.json (github mode) and commit it so pre-receive can read it
+        with open(".pow-config.json", "w") as f:
+            json.dump({"key_source": "github"}, f)
+
         with open(".env", "w") as f:
             f.write("# Empty env\n")
 
         # Install hooks (uses sys.executable shebang so no venv needed)
         subprocess.check_call([sys.executable, "setup_hooks.py"])
 
-        # Initial commit so pre-receive has a base
-        subprocess.check_call(["git", "add", "."])
+        # Commit .pow-config.json so pre-receive can find it via git show
+        subprocess.check_call(["git", "add", ".pow-config.json"])
         subprocess.check_call(
-            ["git", "commit", "--no-verify", "-m", "chore: initial setup"]
+            ["git", "commit", "--no-verify", "-m", "chore: add pow config"]
         )
         self._base_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"]
@@ -279,12 +299,7 @@ class TestGitHubSSHMode(unittest.TestCase):
     def _run_pre_receive(self, old, new):
         script = os.path.join("admin_templates", "pre-receive_hook", "pre-receive")
         stdin = f"{old} {new} refs/heads/main\n".encode()
-        # Build POW config for pre-receive with github_token and api_url
-        pow_cfg = json.dumps({
-            "github_token": "test_token",
-            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
-        }, separators=(',', ':'))
-        env = {**os.environ, "POW": pow_cfg, "GITHUB_USER_LOGIN": "test_user"}
+        env = {**os.environ}
         proc = subprocess.Popen(
             [sys.executable, script],
             stdin=subprocess.PIPE,
@@ -306,11 +321,11 @@ class TestGitHubSSHMode(unittest.TestCase):
 
         pow_checks_b64 = self._trailer("PoW-Checks")
         self.assertTrue(pow_checks_b64)
-        bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
-        self.assertTrue(bundle.get("token"))
-        self.assertTrue(bundle.get("session"))
-        self.assertEqual(bundle.get("status"), "PASSED")
-        self.assertTrue(bundle.get("checks_hash"))
+        sig_raw, session, status, checks_hash = decode_pow_trailer(pow_checks_b64)
+        self.assertTrue(sig_raw)
+        self.assertTrue(session)
+        self.assertEqual(status, "PASSED")
+        self.assertTrue(checks_hash)
 
     def test_signature_is_valid_ed25519(self):
         """The token signature in the PoW-Checks bundle must be verifiable with the test key."""
@@ -320,17 +335,11 @@ class TestGitHubSSHMode(unittest.TestCase):
         subprocess.check_call(["git", "commit", "-m", "feat: add b"])
 
         pow_checks_b64 = self._trailer("PoW-Checks")
-        bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
-
-        token = bundle["token"]
-        session = bundle["session"]
-        status = bundle["status"]
-        cmd_hash = bundle["checks_hash"]
+        sig_raw, session, status, cmd_hash = decode_pow_trailer(pow_checks_b64)
         tree = subprocess.check_output(
             ["git", "log", "-1", "--format=%T"]
         ).decode().strip()
 
-        sig_raw = base64.b64decode(token)
         payload = f"{cmd_hash}|{tree}|{session}|{status}".encode()
         pub = self._ed_priv.public_key()
         pub.verify(sig_raw, payload)   # raises on failure
@@ -343,13 +352,12 @@ class TestGitHubSSHMode(unittest.TestCase):
             subprocess.check_call(["git", "add", name])
             subprocess.check_call(["git", "commit", "-m", f"feat: {name}"])
 
-        # git log --format=%(trailers:...) may emit blank lines between commits
         raw = subprocess.check_output([
             "git", "log", "-2", "--format=%(trailers:key=PoW-Checks,valueonly)"
         ]).decode()
         blobs = [s for s in raw.splitlines() if s.strip()]
         self.assertEqual(len(blobs), 2)
-        sessions = [json.loads(base64.b64decode(b).decode())["session"] for b in blobs]
+        sessions = [decode_pow_trailer(b)[1] for b in blobs]
         self.assertEqual(len(sessions), 2)
         self.assertNotEqual(sessions[0], sessions[1])
         self.assertEqual(len(sessions[0]), 36)
@@ -376,10 +384,10 @@ class TestGitHubSSHMode(unittest.TestCase):
 
         pow_checks_b64 = self._trailer("PoW-Checks")
         self.assertTrue(pow_checks_b64)
-        bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
-        self.assertTrue(bundle.get("token"))
-        self.assertEqual(bundle.get("status"), "PASSED")
-        self.assertTrue(bundle.get("checks_hash"))
+        sig_raw, session, status, checks_hash = decode_pow_trailer(pow_checks_b64)
+        self.assertTrue(sig_raw)
+        self.assertEqual(status, "PASSED")
+        self.assertTrue(checks_hash)
 
     def test_pre_receive_accepts_valid_signature(self):
         """pre-receive must pass when commits carry valid GitHub SSH signatures."""
@@ -419,8 +427,7 @@ class TestGitHubSSHMode(unittest.TestCase):
         _, _, other_pub_ssh = _gen_ed25519()
         self._mock_server.shutdown()
         self._mock_server.server_close()
-        import time
-        time.sleep(0.3)
+        import time; time.sleep(0.3)
         self._mock_server = _make_mock_api_server(other_pub_ssh, self._mock_port)
 
         rc, out = self._run_pre_receive(self._base_commit, signed_commit)
@@ -450,11 +457,6 @@ class TestGitHubSSHMode(unittest.TestCase):
         with open(event_path, "w") as f:
             json.dump(event, f)
 
-        pow_cfg = json.dumps({
-            "enforce": "true",
-            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
-        }, separators=(',', ':'))
-
         env = {
             **os.environ,
             "GITHUB_TOKEN":      "test_token",
@@ -462,7 +464,8 @@ class TestGitHubSSHMode(unittest.TestCase):
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_EVENT_PATH": event_path,
             "GITHUB_REF":        "refs/heads/main",
-            "POW":               pow_cfg,
+            "POW_GITHUB_API_URL": f"http://127.0.0.1:{self._mock_port}",
+            "POW_ENFORCE":       "true",
         }
         script = os.path.join("admin_templates", "github", "scripts", "verify_pow.py")
         proc = subprocess.run(
@@ -487,19 +490,13 @@ class TestGitHubSSHMode(unittest.TestCase):
         _, _, other_pub = _gen_ed25519()
         self._mock_server.shutdown()
         self._mock_server.server_close()
-        import time
-        time.sleep(0.3)
+        import time; time.sleep(0.3)
         self._mock_server = _make_mock_api_server(other_pub, self._mock_port)
 
         event = {"before": self._base_commit, "after": head}
         event_path = os.path.join(self.temp_dir, "push_event_bad.json")
         with open(event_path, "w") as f:
             json.dump(event, f)
-
-        pow_cfg = json.dumps({
-            "enforce": "true",
-            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
-        }, separators=(',', ':'))
 
         env = {
             **os.environ,
@@ -508,7 +505,8 @@ class TestGitHubSSHMode(unittest.TestCase):
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_EVENT_PATH": event_path,
             "GITHUB_REF":        "refs/heads/main",
-            "POW":               pow_cfg,
+            "POW_GITHUB_API_URL": f"http://127.0.0.1:{self._mock_port}",
+            "POW_ENFORCE":       "true",
         }
         script = os.path.join("admin_templates", "github", "scripts", "verify_pow.py")
         proc = subprocess.run(
