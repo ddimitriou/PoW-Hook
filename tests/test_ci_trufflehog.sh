@@ -98,6 +98,7 @@ git commit --no-verify -m "chore: add pow config"
 INITIAL_COMMIT=$(git rev-parse HEAD)
 git push -u origin main --quiet
 
+export POW_ENFORCE=true
 # ---------------------------------------------------------------------------
 # CHECK 1: Trufflehog blocks secret commit locally
 # ---------------------------------------------------------------------------
