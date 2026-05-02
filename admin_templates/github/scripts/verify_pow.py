@@ -8,12 +8,14 @@ keys, and optionally cross-references the server-side attestation artifact.
 """
 import sys
 import os
+import struct
 import subprocess
 import base64
 import json
 import time
 import urllib.request
 import hashlib
+import uuid as uuid_mod
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
@@ -61,6 +63,27 @@ def get_github_ssh_keys(username, gh_token):
     except Exception as e:
         print(f"   ⚠️  Could not fetch SSH keys for {username}: {e}")
         return []
+
+
+def decode_pow_trailer(b64_value):
+    """
+    Decode a compact binary PoW-Checks trailer value.
+    Format: [0x01 version][2B BE sig_len][sig][16B UUID][1B status][32B sha256]
+    Returns (sig_raw, session_id, status_str, checks_hash_hex).
+    """
+    packed = base64.b64decode(b64_value)
+    if not packed or packed[0] != 0x01:
+        raise ValueError(f"Unknown PoW trailer version: {packed[0] if packed else 'empty'}")
+    sig_len = struct.unpack_from('>H', packed, 1)[0]
+    offset = 3
+    sig = packed[offset:offset + sig_len]
+    offset += sig_len
+    session_id = str(uuid_mod.UUID(bytes=packed[offset:offset + 16]))
+    offset += 16
+    status = 'PASSED' if packed[offset] == 1 else 'FAILED'
+    offset += 1
+    checks_hash = packed[offset:offset + 32].hex()
+    return sig, session_id, status, checks_hash
 
 
 def verify_with_github_keys(sig_raw, payload_bytes, username, gh_token):
@@ -213,30 +236,19 @@ def main():
             break
             
         try:
-            bundle_json = base64.b64decode(pow_checks_b64).decode()
-            bundle = json.loads(bundle_json)
-            token = bundle["token"]
-            session = bundle["session"]
-            status = bundle["status"]
-            cmd_hash = bundle["checks_hash"]
+            sig_raw, session, status, cmd_hash = decode_pow_trailer(pow_checks_b64)
         except Exception:
-            print(f"❌ Commit {commit} PoW-Checks trailer is not valid base64 JSON.")
+            print(f"❌ Commit {commit} PoW-Checks trailer is not valid.")
             missing += 1
             break
-            
+
         if cmd_hash != expected_hash:
             print(f"❌ Commit {commit} used incorrect POW_CHECKS_CMD (hash mismatch).")
             missing += 1
             break
 
-        # 2. Decode signature
+        # 2. Reconstruct and verify signature
         sign_payload = f"{cmd_hash}|{tree_hash}|{session}|{status}"
-        try:
-            sig_raw = base64.b64decode(token)
-        except Exception:
-            print(f"❌ Commit {commit} token is not valid base64.")
-            missing += 1
-            break
 
         # 3. Verify signature
         username = get_github_username_for_commit(repo, commit, gh_token)

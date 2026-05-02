@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import sys
 import os
+import struct
+import json
 import subprocess
 import base64
-import json
+import uuid as uuid_mod
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
@@ -103,18 +105,25 @@ if os.path.exists(passed_flag):
         if not key_path:
             print("❌ Error: No SSH private key found. Run setup_hooks.py again.")
             sys.exit(1)
+        if not os.environ.get("POW_SSH_KEY"):
+            print(f"⚠️  POW_SSH_KEY not set — using auto-detected key: {key_path}")
+            print("   Ensure this key is registered at github.com/settings/keys,")
+            print("   or set POW_SSH_KEY in .env to the correct private key path.")
         private_key = load_private_key(key_path)
 
-        signature = sign_with_key(private_key, sign_payload.encode())
-        token = base64.b64encode(signature).decode()
-        
-        bundle = json.dumps({
-            "token": token,
-            "session": session_id,
-            "status": status,
-            "checks_hash": pow_checks_hash
-        })
-        pow_checks = base64.b64encode(bundle.encode()).decode()
+        sig_bytes = sign_with_key(private_key, sign_payload.encode())
+        uuid_bytes = uuid_mod.UUID(session_id).bytes
+        status_byte = 1 if status == "PASSED" else 0
+        hash_bytes = bytes.fromhex(pow_checks_hash)
+        packed = (
+            bytes([0x01])
+            + struct.pack('>H', len(sig_bytes))
+            + sig_bytes
+            + uuid_bytes
+            + bytes([status_byte])
+            + hash_bytes
+        )
+        pow_checks = base64.b64encode(packed).decode()
 
         # Strip comment lines (e.g., from MERGE_MSG) before injecting trailers.
         # Without this, git interpret-trailers appends trailers after comments;
