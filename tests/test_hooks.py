@@ -452,6 +452,7 @@ class TestGitHubSSHMode(unittest.TestCase):
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_EVENT_PATH": event_path,
             "GITHUB_REF":        "refs/heads/main",
+            "POW_ENFORCE":       "true",
             "POW_GITHUB_API_URL": f"http://127.0.0.1:{self._mock_port}",
         }
         script = os.path.join("admin_templates", "github", "scripts", "verify_pow.py")
@@ -492,6 +493,7 @@ class TestGitHubSSHMode(unittest.TestCase):
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_EVENT_PATH": event_path,
             "GITHUB_REF":        "refs/heads/main",
+            "POW_ENFORCE":       "true",
             "POW_GITHUB_API_URL": f"http://127.0.0.1:{self._mock_port}",
         }
         script = os.path.join("admin_templates", "github", "scripts", "verify_pow.py")

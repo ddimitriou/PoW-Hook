@@ -17,7 +17,7 @@ This project was created with [Google Antigravity](https://antigravity.google/) 
 
 PoW-Hook securely enforces that developers run required quality checks (linters, secret scanners, unit tests) locally before they are permitted to push to a central repository.
 
-The system is constructed with an aggressive zero-trust architecture, treating the developer's client machine as untrusted until proven otherwise by cryptographic signatures and remote server-side validations.
+The system is constructed with an aggressive zero-trust architecture, treating the developer's client machine as untrusted until proven otherwise by cryptographic signatures and remote server-side validations. As a final zero-trust fallback, the server gatekeeper independently executes the exact same quality checks on the incoming commits to ensure no malicious bypass occurred.
 
 [👉 **View the complete Sequence and Architecture Diagrams in `ARCHITECTURE.md`**](ARCHITECTURE.md)
 

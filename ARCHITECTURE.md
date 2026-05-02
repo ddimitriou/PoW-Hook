@@ -40,6 +40,7 @@ graph TD
         VERIFY -->|1. Fetches PubKeys| GH_API
         VERIFY -->|2. Validates Trailer Sig| REMOTE_COMMIT
         VERIFY -->|3. Cross-references Attestation| ARTIF
+        VERIFY -->|4. Executes Check| POW_CMD[POW_CHECKS_CMD]
     end
 ```
 
@@ -94,7 +95,9 @@ sequenceDiagram
     Validator->>GH: Query GitHub Actions API for Artifact matching Session ID & Hash
     GH-->>Validator: Return artifact match
     
-    alt If Signature, Hash, and Artifacts all match
+    Validator->>Validator: Independently execute POW_CHECKS_CMD on server codebase
+    
+    alt If Signature, Hash, Artifacts match, AND Check passes
         Validator-->>GH: Accept Commit natively
     else Any deviation
         Validator-->>GH: Block Push / Revert Forcefully natively
@@ -111,3 +114,4 @@ sequenceDiagram
 2. **Key Non-Repudiation**: Developers do not upload random public keys manually. The server inherently trusts the keys registered dynamically on `github.com/settings/ssh`, meaning only the legitimate user profile can forge their own signatures. 
 3. **Execution Masking Hacks**: Command execution commands (`POW_CHECKS_CMD`) are cryptographically packaged and verified. A developer cannot run `docker run my-fake-tests` locally because the server gatekeeper will hash its own expected command string and detect the divergence.
 4. **Air-Gap Prevention**: The async Ledger step guarantees that developers cannot "mock" a signature locally without checking in with the server. Even if a local signature evaluates flawlessly, if the GitHub Action Ledger never generated the secondary artifact, the push is aggressively rejected.
+5. **Zero-Trust Server Execution Fallback**: Even if an attacker maliciously forges a signature and manually spoofs the Ledger attestation via the GitHub API, the server gatekeeper independently executes the exact same quality checks on the incoming repository state. Any securely injected vulnerabilities are caught via this zero-trust mechanism.

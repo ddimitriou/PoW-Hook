@@ -141,6 +141,7 @@ GITHUB_REPOSITORY=owner/repo \
 GITHUB_EVENT_NAME=push \
 GITHUB_EVENT_PATH="$TEST_DIR/push_event.json" \
 GITHUB_REF=refs/heads/main \
+POW_ENFORCE=true \
 POW_GITHUB_API_URL=http://127.0.0.1:$MOCK_PORT \
 $PYTHON admin_templates/github/scripts/verify_pow.py
 CHECK1_EXIT=$?
@@ -183,6 +184,7 @@ GITHUB_REPOSITORY=owner/repo \
 GITHUB_EVENT_NAME=push \
 GITHUB_EVENT_PATH="$TEST_DIR/bypass_event.json" \
 GITHUB_REF=refs/heads/main \
+POW_ENFORCE=true \
 POW_GITHUB_API_URL=http://127.0.0.1:$MOCK_PORT \
 $PYTHON admin_templates/github/scripts/verify_pow.py 2>&1
 CHECK2_EXIT=$?
