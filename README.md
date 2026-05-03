@@ -23,6 +23,8 @@ The system is constructed with an aggressive zero-trust architecture, treating t
 
 [👉 **View the complete Sequence and Architecture Diagrams in `ARCHITECTURE.md`**](ARCHITECTURE.md)
 
+You can also visit my blog where I have published a post about it at [here](https://must-feed.com/2026/04/18/pow-hook-zero-trust-security-for-your-git-hooks/)
+
 ---
 
 ## Supported Key Types
@@ -37,6 +39,21 @@ The signing and verification layer handles all SSH key types supported by GitHub
 | RSA               | PKCS#1 v1.5 with SHA-256       |
 
 The correct algorithm is chosen automatically at runtime based on the key loaded — no configuration required.
+
+---
+
+## Prerequisites
+
+Before installing or running PoW-Hook, ensure you have the following requirements met:
+
+1. **Git version >= 2.15.0**: Required for `git interpret-trailers --in-place` support.
+2. **GitHub Account Setup**:
+   - An SSH key generated and added to your GitHub account (used for commit signing).
+   - A Personal Access Token (PAT) with `actions` scope (required for server-side attestation dispatch).
+3. **Repository Setup**:
+   - A valid GitHub repository slug.
+
+These environment variables must be properly configured in your local `.env` file (see the Developer Configuration section).
 
 ---
 
@@ -162,7 +179,7 @@ This makes the force-revert a fallback — GitHub natively blocks unverified mer
 ```bash
 # On Linux / macOS
 pip install cryptography pytest
-python -m pytest tests/test_hooks.py -v --tb=short
+python3 -m pytest tests/test_hooks.py -v --tb=short
 
 # On Windows (runs inside a Docker container — required for git hook execution)
 bash tests/run_tests_windows.sh
@@ -189,10 +206,10 @@ Pushing to any branch or opening a pull request triggers the CI workflow at `.gi
 | Job | What it does |
 |-----|--------------|
 | `unit-tests` | Runs `pytest test_hooks.py` directly on `ubuntu-latest` |
-| `e2e-github-ssh` | Runs `test_ci_github_ssh.sh` — verifies signing and rejection without act |
+| `e2e-github-ssh` | Runs `test_ci_github_ssh.sh` — verifies signing and rejection |
 | `e2e-trufflehog` | Runs `test_ci_trufflehog.sh` — verifies trufflehog scan and bypass rejection |
 
-E2E jobs only start if unit tests pass. The workflow has no dependency on `act` or large runner images.
+E2E jobs only start if unit tests pass.
 
 ---
 

@@ -1,7 +1,6 @@
 import os
 import re
 import stat
-import shutil
 import json
 import subprocess
 import sys
@@ -120,7 +119,7 @@ def ensure_central_venv():
     suffix = ".exe" if os.name == "nt" else ""
     venv_python = os.path.join(CENTRAL_VENV_DIR, "Scripts" if os.name == "nt" else "bin", f"python{suffix}")
 
-    print(f"📥 Ensuring 'cryptography' is installed in central venv...")
+    print("📥 Ensuring 'cryptography' is installed in central venv...")
     try:
         subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip"], capture_output=True, check=True)
         subprocess.run([venv_python, "-m", "pip", "install", "cryptography"], capture_output=True, check=True)
@@ -140,7 +139,7 @@ def resolve_best_python():
 
     # Fallback to current interpreter if for some reason central venv fails
     try:
-        import cryptography
+        import cryptography  # noqa: F401
         return sys.executable
     except ImportError:
         pass
@@ -169,13 +168,13 @@ def setup_github_ssh_mode(target_repo="."):
         ok, username = validate_github_ssh_key(key_path)
         if ok:
             print(f"✅ Authenticated as GitHub user: {username}")
-            print(f"ℹ️  This key will be used to sign your commits automatically.")
+            print("ℹ️  This key will be used to sign your commits automatically.")
             update_env_file(target_repo, "POW_SSH_KEY", key_path)
             return key_path
 
     # If none validated, fall back to the first one with a warning
     fallback = candidates[0]
-    print(f"   ⚠️  None of the discovered keys could validate against GitHub.")
+    print("   ⚠️  None of the discovered keys could validate against GitHub.")
     print(f"      Falling back to: {fallback}")
     print("      Ensure this key is added to your GitHub account before pushing.")
     update_env_file(target_repo, "POW_SSH_KEY", fallback)
@@ -199,7 +198,6 @@ def install():
     if interp is None:
         print("❌ Aborting: Could not find or create a Python environment with 'cryptography' installed.")
         return
-    
     interp = interp.replace("\\", "/")
     if os.name == "nt" and len(interp) >= 2 and interp[1] == ":":
         # C:/path -> /c/path

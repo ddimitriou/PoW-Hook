@@ -18,7 +18,6 @@ import socket
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
-    Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -318,11 +317,11 @@ class TestGitHubSSHMode(unittest.TestCase):
         pow_checks_b64 = self._trailer("PoW-Checks")
         bundle = json.loads(base64.b64decode(pow_checks_b64).decode())
 
-        token     = bundle["token"]
-        session   = bundle["session"]
-        status    = bundle["status"]
-        cmd_hash  = bundle["checks_hash"]
-        tree      = subprocess.check_output(
+        token = bundle["token"]
+        session = bundle["session"]
+        status = bundle["status"]
+        cmd_hash = bundle["checks_hash"]
+        tree = subprocess.check_output(
             ["git", "log", "-1", "--format=%T"]
         ).decode().strip()
 
@@ -415,7 +414,8 @@ class TestGitHubSSHMode(unittest.TestCase):
         _, _, other_pub_ssh = _gen_ed25519()
         self._mock_server.shutdown()
         self._mock_server.server_close()
-        import time; time.sleep(0.3)
+        import time
+        time.sleep(0.3)
         self._mock_server = _make_mock_api_server(other_pub_ssh, self._mock_port)
 
         rc, out = self._run_pre_receive(self._base_commit, signed_commit)
@@ -478,7 +478,8 @@ class TestGitHubSSHMode(unittest.TestCase):
         _, _, other_pub = _gen_ed25519()
         self._mock_server.shutdown()
         self._mock_server.server_close()
-        import time; time.sleep(0.3)
+        import time
+        time.sleep(0.3)
         self._mock_server = _make_mock_api_server(other_pub, self._mock_port)
 
         event = {"before": self._base_commit, "after": head}
