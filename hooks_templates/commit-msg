@@ -103,6 +103,11 @@ if os.path.exists(passed_flag):
         if not key_path:
             print("❌ Error: No SSH private key found. Run setup_hooks.py again.")
             sys.exit(1)
+        if not os.environ.get("POW_SSH_KEY"):
+            print(f"⚠️  POW_SSH_KEY not set — using auto-detected key: {key_path}")
+            print("   Ensure this key is registered at github.com/settings/keys,")
+            print("   or set POW_SSH_KEY in .env to the correct private key path.")
+
         private_key = load_private_key(key_path)
 
         signature = sign_with_key(private_key, sign_payload.encode())

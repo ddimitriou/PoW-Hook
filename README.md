@@ -1,6 +1,8 @@
 # PoW-Hook: Proof-of-Work Git Validator
 
 [![CI](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml/badge.svg)](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 **PoW-Hook** is an autonomous "Proof of Work" validation system for Github repositories. It cryptographically guarantees that no code enters your remote repository unless it has legitimately passed your local quality, linting, or security checks.
 
 The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the [Github Advanced Security] product, which runs a pre-receive hook server side and block everything before it hits the git ledger. The intent was to develop an easy way to prevent at-scale developer from committing secrets and then accidentally push them into Github.
@@ -234,3 +236,9 @@ E2E jobs only start if unit tests pass. The workflow has no dependency on `act` 
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## License
+
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
