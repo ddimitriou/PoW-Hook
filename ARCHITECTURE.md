@@ -108,6 +108,38 @@ sequenceDiagram
     end
 ```
 
+## Anatomy of a Signed Commit
+
+Once the Proof-of-Work process is complete, the commit carries a `PoW-Checks` trailer containing the cryptographic attestation.
+
+### Example Commit Log
+```text
+commit ce9ae77c517308f59eae02c895135249d6dac062 (HEAD -> main, origin/main, origin/HEAD)
+Author: Dimitrios Dimitriou <dimitriou.d.a@gmail.com>
+Date:   Sun May 3 20:41:00 2026 +0300
+
+    Test6
+
+    PoW-Checks: eyJ0b2tlbiI6ICJHQTAzMk56QkhDYmRuV3R3RktIOHZIRGNjWkZSSmNscXRsY2FvdWVyWkI3Z3Fyd1R5bnR4ZXNvOXIhcXB6N2VKSEZFNmpKWjNza0h2Um80Ri9HR3ZBQT09Iiwic2Vzc2lvbiI6ICJiM2YyNGZkOS05ZjAxLTQwZTUtYjc4OS02NjI3OWMwNGI2NWIiLCJzdGF0dXMiOiAiUEFTU0VEIiwiY2hlY2tzX2hhc2giOiAiNzA0ZTZjNWQwNThiMzdkZWJmM2Yzk1NzVjYmUyZDNhNWQwYzk0MDE4MWM2ODQyOGQ4MjJjYmU5YjYzYTkxMyJ9
+```
+
+### Decoded PoW-Checks Trailer
+The `PoW-Checks` value is a Base64-encoded JSON bundle containing the signature and session metadata:
+
+```json
+{
+  "token": "GA032NzBHCbdnWtwFKH8vHDccZFRJclqtlcaouerZB7gqrwTynxeso9I+qpz7eJHFE6jJZ3skHvRo4F/GGvAA==",
+  "session": "b3f24fd9-9f01-40e5-b789-66279c04b65b",
+  "status": "PASSED",
+  "checks_hash": "704e6c5d058b37debf3f39575cbe2d3a5d0c940181c68428d822cbe9b63a913"
+}
+```
+
+- **token**: The cryptographic signature of the payload (`checks_hash|tree_hash|session|status`) generated using the developer's local SSH private key.
+- **session**: A unique UUID generated for this validation session, used to cross-reference the server-side attestation artifact.
+- **status**: The local result of the quality checks (must be `PASSED`).
+- **checks_hash**: A SHA-256 hash of the `POW_CHECKS_CMD` that was executed. The server re-calculates this hash to ensure the developer didn't run a different (weaker) command locally.
+
 ## Security Guarantees & Tamper Resistance
 
 1. **Commit Tree integrity**: The commit signature encompasses `.git/tree_hash`. If a developer manipulates files post-validation, the tree hash mutates, violating and destroying the signature validity.
