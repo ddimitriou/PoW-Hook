@@ -1,11 +1,11 @@
-# PoW-Hook: Proof-of-Work Git Validator
+# PoW-Hook: Proof-of-Work Github Repository Validator
 
 [![CI](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml/badge.svg)](https://github.com/ddimitriou/PoW-Hook/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **PoW-Hook** is an autonomous "Proof of Work" validation system for Github repositories. It cryptographically guarantees that no code enters your remote repository unless it has legitimately passed your local quality, linting, or security checks.
 
-The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the [Github Advanced Security] product, which runs a pre-receive hook server side and block everything before it hits the git ledger. The intent was to develop an easy way to prevent at-scale developer from committing secrets and then accidentally push them into Github.
+The idea for this project came from reviewing various solutions that allow the blocking of publishing secrets directly into github. The industry standard is to use the [Github Advanced Security](https://docs.github.com/en/get-started/learning-about-github/about-github-advanced-security) product, which runs a pre-receive hook server side and block everything before it hits the git ledger. The intent was to develop an easy way to prevent at-scale developer from committing secrets and then accidentally push them into Github.
 
 This reliably defeats developers bypassing rules with `git commit --no-verify`, deleting their `.git/hooks` folder, or skipping local tests — even malicious insiders.
 
@@ -138,11 +138,13 @@ We're using [trufflehog](https://github.com/trufflesecurity/trufflehog) as the s
 # Command to run before signing (e.g., linters, secret scanners)
 POW_CHECKS_CMD="docker run --rm -v $(pwd):/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail"
 
-# Optional: GitHub PAT with 'actions' scope for server-side attestation dispatch
-GITHUB_PAT_LOCAL="ghp_..."
+# Required for server-side attestation (GitHub Actions mode only):
+# A GitHub Personal Access Token with 'actions' scope to trigger workflow_dispatch events.
+# GITHUB_PAT_LOCAL="ghp_..."
 
-# Optional: repository slug for attestation dispatch
-POW_GITHUB_REPO="owner/repo"
+# Required for server-side attestation (GitHub Actions mode only):
+# The owner/repo slug of this repository (e.g., "ddimitriou/pow-hook").
+# POW_GITHUB_REPO="owner/repo"
 ```
 
 ---
