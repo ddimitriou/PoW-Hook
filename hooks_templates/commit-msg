@@ -118,7 +118,7 @@ if os.path.exists(passed_flag):
             "session": session_id,
             "status": status,
             "checks_hash": pow_checks_hash
-        })
+        }, separators=(',', ':'))
         pow_checks = base64.b64encode(bundle.encode()).decode()
 
         # Strip comment lines (e.g., from MERGE_MSG) before injecting trailers.
