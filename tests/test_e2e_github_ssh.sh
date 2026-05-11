@@ -6,7 +6,7 @@
 #
 # Flow:
 #   1. Generate a test Ed25519 SSH keypair
-#   2. Set up a fresh repo in github key_source mode
+#   2. Set up a fresh repo
 #   3. Install hooks (with POW_SSH_KEY_OVERRIDE pointing at the test key)
 #   4. Start a mock GitHub API server accessible from within the act container
 #   5. Make a validly-signed commit, then run act push → must PASS
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # Use the project's virtual environment if available, otherwise fallback to system python
-VENV_PYTHON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python"
+VENV_PYTHON="$HOME/.pow-hook/venv/bin/python"
 if [ -f "$VENV_PYTHON" ]; then
     PYTHON="$VENV_PYTHON"
 else
@@ -82,7 +82,7 @@ ssh-keygen -t ed25519 -f "$KEY_PATH" -N "" -q -C "e2e-test"
 echo "✅ Keypair at $KEY_PATH"
 
 # ---------------------------------------------------------------------------
-# 2. Set up fresh git repo with GitHub SSH mode
+# 2. Set up fresh git repo
 # ---------------------------------------------------------------------------
 echo "📦 Initialising test repository..."
 cd "$TEST_DIR"
@@ -94,10 +94,6 @@ cp "$PRJ_ROOT"/.env.example .
 git init
 git config user.name  "E2E Test"
 git config user.email "e2e@example.com"
-
-cat > .pow-config.json <<'EOF'
-{"key_source": "github"}
-EOF
 
 cat > .env <<'EOF'
 # Empty env — no attestation dispatch in E2E test
@@ -142,7 +138,9 @@ print(f"[e2e_debug] session={sess}")
 print(f"[e2e_debug] status={stat}")
 print(f"[e2e_debug] tok_len={len(tok)}")
 print(f"[e2e_debug] payload={payload}")
-api = os.environ.get("POW_GITHUB_API_URL", "")
+pow_raw = os.environ.get("POW", "{}")
+cfg = json.loads(pow_raw) if pow_raw else {}
+api = cfg.get("github_api_url", "")
 req = urllib.request.Request(f"{api}/users/test_user/keys")
 data = json.loads(urllib.request.urlopen(req).read())
 pub_str = data[0]["key"]
@@ -175,7 +173,7 @@ jobs:
       - name: Install deps and verify
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          POW_GITHUB_API_URL: ${{ secrets.POW_GITHUB_API_URL }}
+          POW: ${{ secrets.POW }}
         run: |
           pip install cryptography -q --break-system-packages
           python3 .github/scripts/e2e_debug.py
@@ -186,8 +184,6 @@ WORKFLOW
 # 3. Install hooks
 # ---------------------------------------------------------------------------
 echo "🔧 Installing PoW hooks..."
-# Convert key path to Windows-native format so Windows Python can find the file
-# regardless of how environment variables are passed through the git hook chain.
 # Convert key path to Windows-native format if on Windows
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
     KEY_PATH_WIN=$(cygpath -w "$KEY_PATH" | tr '\\' '/')
@@ -200,8 +196,8 @@ echo "   POW_SSH_KEY_OVERRIDE=$POW_SSH_KEY_OVERRIDE"
 $PYTHON setup_hooks.py
 
 # Commit the config so pre-receive can read it via git show
-git add .pow-config.json
-git commit --no-verify -m "chore: add pow config"
+git add .
+git commit --no-verify -m "chore: initial setup"
 INITIAL_COMMIT=$(git rev-parse HEAD)
 
 # ---------------------------------------------------------------------------
@@ -286,7 +282,7 @@ SIGNED_COMMIT=$(git rev-parse HEAD)
 # Build secrets/env file for act
 cat > .secrets <<EOF
 GITHUB_TOKEN=dummy_token
-POW_GITHUB_API_URL=http://${DOCKER_HOST_ADDR}:${MOCK_PORT}
+POW={"enforce":"true","github_api_url":"http://${DOCKER_HOST_ADDR}:${MOCK_PORT}"}
 EOF
 
 # Build a push event payload for act

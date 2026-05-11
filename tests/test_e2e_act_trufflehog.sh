@@ -7,8 +7,8 @@
 #
 # Flow:
 #   1. Generate a test Ed25519 SSH keypair
-#   2. Set up a fresh repo in github key_source mode
-#   3. Install hooks with POW_CHECKS_CMD pointing at trufflehog
+#   2. Set up a fresh repo
+#   3. Install hooks with checks_cmd pointing at trufflehog
 #   4. Stage a file containing a fake GitHub PAT
 #   5. Attempt a normal commit → trufflehog must BLOCK it        (CHECK 1)
 #   6. Bypass with --no-verify, then run act push → must FAIL
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # Use the project's virtual environment if available, otherwise fallback to system python
-VENV_PYTHON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python"
+VENV_PYTHON="$HOME/.pow-hook/venv/bin/python"
 if [ -f "$VENV_PYTHON" ]; then
     PYTHON="$VENV_PYTHON"
 else
@@ -37,6 +37,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
 
+TRUFFLEHOG_CMD='docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
+
 cleanup() {
     set +euo pipefail
     cd "$SCRIPT_DIR" 2>/dev/null || true
@@ -54,7 +56,7 @@ ssh-keygen -t ed25519 -f "$KEY_PATH" -N "" -q -C "e2e-trufflehog"
 echo "✅ Keypair at $KEY_PATH"
 
 # ---------------------------------------------------------------------------
-# 2. Set up fresh git repo with GitHub SSH mode
+# 2. Set up fresh git repo
 # ---------------------------------------------------------------------------
 echo "📦 Initialising test repository..."
 cd "$TEST_DIR"
@@ -67,15 +69,11 @@ git init
 git config user.name  "E2E Test"
 git config user.email "e2e@example.com"
 
-cat > .pow-config.json <<'EOF'
-{"key_source": "github"}
-EOF
-
-# POW_CHECKS_CMD: trufflehog scans the working tree for secrets.
+# checks_cmd: trufflehog scans the working tree for secrets.
 # --no-verification: pattern-match only (no network calls to verify tokens).
 # --fail: exit non-zero when detections are found.
-cat > .env <<'EOF'
-POW_CHECKS_CMD=docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail
+cat > .env <<EOF
+POW='{"checks_cmd":"$TRUFFLEHOG_CMD"}'
 EOF
 
 # ---------------------------------------------------------------------------
@@ -113,15 +111,15 @@ jobs:
       - name: Install deps and verify
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
+          POW: ${{ secrets.POW }}
         run: |
           pip install cryptography -q --break-system-packages
           python3 .github/scripts/verify_pow.py
 WORKFLOW
 
 # Commit baseline (no PoW check on this one — it's the admin setup commit)
-git add .pow-config.json .github
-git commit --no-verify -m "chore: add pow config"
+git add .
+git commit --no-verify -m "chore: initial setup"
 INITIAL_COMMIT=$(git rev-parse HEAD)
 
 # ---------------------------------------------------------------------------
@@ -161,8 +159,9 @@ echo "════════════════════════�
 git commit --no-verify -m "chore: bypass hooks and inject secret"
 BYPASS_COMMIT=$(git rev-parse HEAD)
 
-cat > .secrets <<'EOF'
+cat > .secrets <<EOF
 GITHUB_TOKEN=dummy_token
+POW={"enforce":"true","checks_cmd":"$TRUFFLEHOG_CMD"}
 EOF
 
 cat > "$TEST_DIR/pow_trufflehog_event.json" <<EOF

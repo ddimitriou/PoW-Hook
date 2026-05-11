@@ -31,15 +31,24 @@ def load_env():
         pass
 
 
-def find_ssh_key():
+def load_pow_config():
+    """Parse the POW environment variable as a JSON object."""
+    raw = os.environ.get("POW", "{}")
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def find_ssh_key(cfg):
     """Return the SSH private key path used for github.com connections."""
     # Priority 1: Specifically configured key from setup
-    env_key = os.environ.get("POW_SSH_KEY")
+    env_key = cfg.get("ssh_key", "")
     if env_key and os.path.exists(env_key):
         return env_key
 
     # Priority 2: Test/CI override
-    override = os.environ.get("POW_SSH_KEY_OVERRIDE")
+    override = cfg.get("ssh_key_override", "")
     if override and os.path.exists(override):
         return override
 
@@ -85,6 +94,7 @@ def sign_with_key(private_key, payload_bytes):
 
 
 load_env()
+cfg = load_pow_config()
 
 if os.path.exists(passed_flag):
     with open(passed_flag, "r") as f:
@@ -99,14 +109,14 @@ if os.path.exists(passed_flag):
         tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
         sign_payload = f"{pow_checks_hash}|{tree_hash}|{session_id}|{status}"
 
-        key_path = find_ssh_key()
+        key_path = find_ssh_key(cfg)
         if not key_path:
             print("❌ Error: No SSH private key found. Run setup_hooks.py again.")
             sys.exit(1)
-        if not os.environ.get("POW_SSH_KEY"):
-            print(f"⚠️  POW_SSH_KEY not set — using auto-detected key: {key_path}")
+        if not cfg.get("ssh_key"):
+            print(f"⚠️  ssh_key not set in POW — using auto-detected key: {key_path}")
             print("   Ensure this key is registered at github.com/settings/keys,")
-            print("   or set POW_SSH_KEY in .env to the correct private key path.")
+            print("   or set ssh_key in the POW env var to the correct private key path.")
 
         private_key = load_private_key(key_path)
 

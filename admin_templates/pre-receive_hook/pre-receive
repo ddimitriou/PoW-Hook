@@ -19,6 +19,15 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 
 
+def load_pow_config():
+    """Parse the POW environment variable as a JSON object."""
+    raw = os.environ.get("POW", "{}")
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -85,8 +94,8 @@ def verify_with_github_keys(sig_raw, payload_bytes, username, token, api_base):
 # Push verification
 # ---------------------------------------------------------------------------
 
-def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
-    expected_cmd = os.environ.get("POW_CHECKS_CMD", "none")
+def verify_push(old_rev, new_rev, gh_token, api_base, pusher, cfg):
+    expected_cmd = cfg.get("checks_cmd", "none")
     expected_hash = hashlib.sha256(expected_cmd.encode()).hexdigest()
     
     cmd = ["git", "log", f"{old_rev}..{new_rev}", "--format=%H"]
@@ -126,7 +135,7 @@ def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
             return False
             
         if cmd_hash != expected_hash:
-            print(f"❌ Commit {commit_hash} used incorrect POW_CHECKS_CMD (hash mismatch).")
+            print(f"❌ Commit {commit_hash} used incorrect checks_cmd (hash mismatch).")
             return False
 
         sign_payload = f"{cmd_hash}|{tree_hash}|{session}|{status}"
@@ -138,7 +147,7 @@ def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
             return False
 
         if not gh_token:
-            print("❌ Server error: POW_GITHUB_TOKEN is required for GitHub SSH key mode.")
+            print("❌ Server error: github_token is required for GitHub SSH key mode.")
             return False
         if not pusher:
             print("❌ Server error: GITHUB_USER_LOGIN is not set — cannot resolve pusher's SSH keys.")
@@ -154,9 +163,11 @@ def verify_push(old_rev, new_rev, gh_token, api_base, pusher):
 
 
 def main():
+    cfg = load_pow_config()
+
     # GitHub Enterprise injects the pusher's login and the API base URL.
-    gh_token  = os.environ.get("POW_GITHUB_TOKEN")
-    api_base  = os.environ.get("POW_GITHUB_API_URL", "https://api.github.com")
+    gh_token  = cfg.get("github_token", "")
+    api_base  = cfg.get("github_api_url", "https://api.github.com")
     pusher    = os.environ.get("GITHUB_USER_LOGIN")
 
     # Read the first ref to determine config (all refs in a single push share a repo).
@@ -169,7 +180,7 @@ def main():
         if new == "0000000000000000000000000000000000000000":
             continue
 
-        if not verify_push(old, new, gh_token, api_base, pusher):
+        if not verify_push(old, new, gh_token, api_base, pusher, cfg):
             print("-------------------------------------------------------")
             print("REJECTED: One or more commits bypassed local hooks.")
             print("Please install the project hooks and re-commit.")

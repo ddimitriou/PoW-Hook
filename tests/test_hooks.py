@@ -216,9 +216,13 @@ class TestGitHubSSHMode(unittest.TestCase):
         # Start mock GitHub API
         self._mock_port = _free_port()
         self._mock_server = _make_mock_api_server(self._pub_ssh, self._mock_port)
-        self._set_env("POW_GITHUB_API_URL", f"http://127.0.0.1:{self._mock_port}")
-        self._set_env("POW_GITHUB_TOKEN", "test_token")
-        self._set_env("GITHUB_USER_LOGIN", "test_user")
+
+        # Build POW JSON for hooks — ssh_key_override and github_api_url
+        pow_cfg = json.dumps({
+            "ssh_key_override": self._key_path,
+            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
+        }, separators=(',', ':'))
+        self._set_env("POW", pow_cfg)
 
         # Initialise git repo
         subprocess.check_call(["git", "init", "-b", "main"])
@@ -231,20 +235,16 @@ class TestGitHubSSHMode(unittest.TestCase):
         shutil.copy2(os.path.join(REPO_ROOT, "setup_hooks.py"), "setup_hooks.py")
         shutil.copy2(os.path.join(REPO_ROOT, ".env.example"), ".env.example")
 
-        # Write .pow-config.json (github mode) and commit it so pre-receive can read it
-        with open(".pow-config.json", "w") as f:
-            json.dump({"key_source": "github"}, f)
-
         with open(".env", "w") as f:
             f.write("# Empty env\n")
 
         # Install hooks (uses sys.executable shebang so no venv needed)
         subprocess.check_call([sys.executable, "setup_hooks.py"])
 
-        # Commit .pow-config.json so pre-receive can find it via git show
-        subprocess.check_call(["git", "add", ".pow-config.json"])
+        # Initial commit so pre-receive has a base
+        subprocess.check_call(["git", "add", "."])
         subprocess.check_call(
-            ["git", "commit", "--no-verify", "-m", "chore: add pow config"]
+            ["git", "commit", "--no-verify", "-m", "chore: initial setup"]
         )
         self._base_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"]
@@ -279,7 +279,12 @@ class TestGitHubSSHMode(unittest.TestCase):
     def _run_pre_receive(self, old, new):
         script = os.path.join("admin_templates", "pre-receive_hook", "pre-receive")
         stdin = f"{old} {new} refs/heads/main\n".encode()
-        env = {**os.environ}
+        # Build POW config for pre-receive with github_token and api_url
+        pow_cfg = json.dumps({
+            "github_token": "test_token",
+            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
+        }, separators=(',', ':'))
+        env = {**os.environ, "POW": pow_cfg, "GITHUB_USER_LOGIN": "test_user"}
         proc = subprocess.Popen(
             [sys.executable, script],
             stdin=subprocess.PIPE,
@@ -445,6 +450,11 @@ class TestGitHubSSHMode(unittest.TestCase):
         with open(event_path, "w") as f:
             json.dump(event, f)
 
+        pow_cfg = json.dumps({
+            "enforce": "true",
+            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
+        }, separators=(',', ':'))
+
         env = {
             **os.environ,
             "GITHUB_TOKEN":      "test_token",
@@ -452,8 +462,7 @@ class TestGitHubSSHMode(unittest.TestCase):
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_EVENT_PATH": event_path,
             "GITHUB_REF":        "refs/heads/main",
-            "POW_ENFORCE":       "true",
-            "POW_GITHUB_API_URL": f"http://127.0.0.1:{self._mock_port}",
+            "POW":               pow_cfg,
         }
         script = os.path.join("admin_templates", "github", "scripts", "verify_pow.py")
         proc = subprocess.run(
@@ -487,6 +496,11 @@ class TestGitHubSSHMode(unittest.TestCase):
         with open(event_path, "w") as f:
             json.dump(event, f)
 
+        pow_cfg = json.dumps({
+            "enforce": "true",
+            "github_api_url": f"http://127.0.0.1:{self._mock_port}",
+        }, separators=(',', ':'))
+
         env = {
             **os.environ,
             "GITHUB_TOKEN":      "test_token",
@@ -494,8 +508,7 @@ class TestGitHubSSHMode(unittest.TestCase):
             "GITHUB_EVENT_NAME": "push",
             "GITHUB_EVENT_PATH": event_path,
             "GITHUB_REF":        "refs/heads/main",
-            "POW_ENFORCE":       "true",
-            "POW_GITHUB_API_URL": f"http://127.0.0.1:{self._mock_port}",
+            "POW":               pow_cfg,
         }
         script = os.path.join("admin_templates", "github", "scripts", "verify_pow.py")
         proc = subprocess.run(
