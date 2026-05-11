@@ -9,7 +9,7 @@ The system is constructed with an aggressive trust-no-one zero-trust architectur
 ```mermaid
 graph TD
     subgraph "1. Client (Developer Machine)"
-        ENV[.env<br>POW_CHECKS_CMD]
+        ENV[.env<br>POW JSON]
         HOOK_PC[pre-commit hook]
         HOOK_CM[commit-msg hook]
         SSH_KEY[SSH Private Key]
@@ -40,7 +40,7 @@ graph TD
         VERIFY -->|1. Fetches PubKeys| GH_API
         VERIFY -->|2. Validates Trailer Sig| REMOTE_COMMIT
         VERIFY -->|3. Cross-references Attestation| ARTIF
-        VERIFY -->|4. Executes Check| POW_CMD[POW_CHECKS_CMD]
+        VERIFY -->|4. Executes Check| POW_CMD[checks_cmd]
     end
 ```
 
@@ -59,7 +59,7 @@ sequenceDiagram
     Note over Dev, Git: Phase 1: Local Pre-commit
     Dev->>Git: git commit
     Git->>Git: Execute `pre-commit` hook
-    Git->>Git: Hash `POW_CHECKS_CMD` (SHA256)
+    Git->>Git: Hash `checks_cmd` from POW config (SHA256)
     Git->>Git: Generate unique Session UUID
     Git->>Git: Run defined quality checks
     
@@ -89,13 +89,13 @@ sequenceDiagram
     Validator->>Validator: Extract Base64 `PoW-Checks` payload
     Validator->>Validator: Cryptographically verify SSH signature
     
-    Validator->>Validator: Hash Server's strictly expected `POW_CHECKS_CMD`
+    Validator->>Validator: Hash Server's strictly expected `checks_cmd`
     Validator->>Validator: Assert local hash securely matches server hash
     
     Validator->>GH: Query GitHub Actions API for Artifact matching Session ID & Hash
     GH-->>Validator: Return artifact match
     
-    Validator->>Validator: Independently execute POW_CHECKS_CMD on server codebase
+    Validator->>Validator: Independently execute checks_cmd on server codebase
     
     alt If Signature, Hash, Artifacts match, AND Check passes
         Validator-->>GH: Accept Commit natively
@@ -138,12 +138,12 @@ The `PoW-Checks` value is a Base64-encoded JSON bundle containing the signature 
 - **token**: The cryptographic signature of the payload (`checks_hash|tree_hash|session|status`) generated using the developer's local SSH private key.
 - **session**: A unique UUID generated for this validation session, used to cross-reference the server-side attestation artifact.
 - **status**: The local result of the quality checks (must be `PASSED`).
-- **checks_hash**: A SHA-256 hash of the `POW_CHECKS_CMD` that was executed. The server re-calculates this hash to ensure the developer didn't run a different (weaker) command locally.
+- **checks_hash**: A SHA-256 hash of the `checks_cmd` that was executed. The server re-calculates this hash to ensure the developer didn't run a different (weaker) command locally.
 
 ## Security Guarantees & Tamper Resistance
 
 1. **Commit Tree integrity**: The commit signature encompasses `.git/tree_hash`. If a developer manipulates files post-validation, the tree hash mutates, violating and destroying the signature validity.
 2. **Key Non-Repudiation**: Developers do not upload random public keys manually. The server inherently trusts the keys registered dynamically on `github.com/settings/ssh`, meaning only the legitimate user profile can forge their own signatures. 
-3. **Execution Masking Hacks**: Command execution commands (`POW_CHECKS_CMD`) are cryptographically packaged and verified. A developer cannot run `docker run my-fake-tests` locally because the server gatekeeper will hash its own expected command string and detect the divergence.
+3. **Execution Masking Hacks**: The `checks_cmd` is cryptographically packaged and verified. A developer cannot run `docker run my-fake-tests` locally because the server gatekeeper will hash its own expected command string and detect the divergence.
 4. **Air-Gap Prevention**: The async Ledger step guarantees that developers cannot "mock" a signature locally without checking in with the server. Even if a local signature evaluates flawlessly, if the GitHub Action Ledger never generated the secondary artifact, the push is aggressively rejected.
 5. **Zero-Trust Server Execution Fallback**: Even if an attacker maliciously forges a signature and manually spoofs the Ledger attestation via the GitHub API, the server gatekeeper independently executes the exact same quality checks on the incoming repository state. Any securely injected vulnerabilities are caught via this zero-trust mechanism.

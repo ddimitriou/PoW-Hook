@@ -8,7 +8,7 @@
 #
 # Flow:
 #   1. Generate a test Ed25519 SSH keypair
-#   2. Set up a fresh repo in github key_source mode
+#   2. Set up a fresh repo
 #   3. Install hooks (POW_SSH_KEY_OVERRIDE pointing at the test key)
 #   4. Start the mock GitHub API server (test_mock_github_api.py)
 #   5. Make a validly-signed commit, run verify_pow.py → must PASS  (CHECK 1)
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # Use the project's virtual environment if available, otherwise fallback to system python
-VENV_PYTHON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python"
+VENV_PYTHON="$HOME/.pow-hook/venv/bin/python"
 if [ -f "$VENV_PYTHON" ]; then
     PYTHON="$VENV_PYTHON"
 else
@@ -66,10 +66,6 @@ cp -r "$PRJ_ROOT"/admin_templates .
 cp "$PRJ_ROOT"/setup_hooks.py .
 cp "$PRJ_ROOT"/.env.example .
 
-cat > .pow-config.json <<'EOF'
-{"key_source": "github"}
-EOF
-
 cat > .env <<'EOF'
 # Empty env — no attestation dispatch in CI test
 EOF
@@ -87,8 +83,8 @@ export PYTHONUTF8=1
 $PYTHON setup_hooks.py
 
 # Baseline commit (not signed — hooks not yet triggered)
-git add .pow-config.json
-git commit --no-verify -m "chore: add pow config"
+git add .
+git commit --no-verify -m "chore: initial setup"
 INITIAL_COMMIT=$(git rev-parse HEAD)
 git push -u origin main --quiet
 
@@ -141,8 +137,7 @@ GITHUB_REPOSITORY=owner/repo \
 GITHUB_EVENT_NAME=push \
 GITHUB_EVENT_PATH="$TEST_DIR/push_event.json" \
 GITHUB_REF=refs/heads/main \
-POW_ENFORCE=true \
-POW_GITHUB_API_URL=http://127.0.0.1:$MOCK_PORT \
+POW='{"enforce":"true","github_api_url":"http://127.0.0.1:'"$MOCK_PORT"'"}' \
 $PYTHON admin_templates/github/scripts/verify_pow.py
 CHECK1_EXIT=$?
 set -e
@@ -184,8 +179,7 @@ GITHUB_REPOSITORY=owner/repo \
 GITHUB_EVENT_NAME=push \
 GITHUB_EVENT_PATH="$TEST_DIR/bypass_event.json" \
 GITHUB_REF=refs/heads/main \
-POW_ENFORCE=true \
-POW_GITHUB_API_URL=http://127.0.0.1:$MOCK_PORT \
+POW='{"enforce":"true","github_api_url":"http://127.0.0.1:'"$MOCK_PORT"'"}' \
 $PYTHON admin_templates/github/scripts/verify_pow.py 2>&1
 CHECK2_EXIT=$?
 set -e

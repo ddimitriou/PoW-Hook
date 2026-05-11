@@ -9,16 +9,7 @@ HOOK_DIR_TPL = ".git/hooks"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "hooks_templates")
 HOOKS_TO_INSTALL = ["pre-commit", "commit-msg", "pre-merge-commit"]
-POW_CONFIG_FILE_TPL = ".pow-config.json"
 CENTRAL_VENV_DIR = os.path.expanduser("~/.pow-hook/venv")
-
-
-def read_pow_config(target_repo="."):
-    config_file = os.path.join(target_repo, POW_CONFIG_FILE_TPL)
-    if os.path.exists(config_file):
-        with open(config_file) as f:
-            return json.load(f)
-    return {}
 
 
 def find_ssh_key_candidates():
@@ -78,24 +69,35 @@ def validate_github_ssh_key(key_path):
     return False, None
 
 
-def update_env_file(target_repo, key, value):
-    """Update or append a key=value pair in the .env file."""
+def update_pow_env(target_repo, key, value):
+    """Update a key inside the POW JSON blob in the .env file."""
     env_path = os.path.join(target_repo, ".env")
     lines = []
     if os.path.exists(env_path):
         with open(env_path, "r") as f:
             lines = f.readlines()
 
-    found = False
-    new_line = f"{key}={value}\n"
+    # Find and parse existing POW='{...}' line
+    pow_cfg = {}
+    pow_line_idx = None
     for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = new_line
-            found = True
+        stripped = line.strip()
+        if stripped.startswith("POW="):
+            raw = stripped[4:].strip().strip("'\"")
+            try:
+                pow_cfg = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pow_cfg = {}
+            pow_line_idx = i
             break
 
-    if not found:
-        # Ensure a newline if the file doesn't end with one
+    # Merge the new key
+    pow_cfg[key] = value
+    new_line = "POW='" + json.dumps(pow_cfg, separators=(',', ':')) + "'\n"
+
+    if pow_line_idx is not None:
+        lines[pow_line_idx] = new_line
+    else:
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
         lines.append(new_line)
@@ -169,7 +171,7 @@ def setup_github_ssh_mode(target_repo="."):
         if ok:
             print(f"✅ Authenticated as GitHub user: {username}")
             print("ℹ️  This key will be used to sign your commits automatically.")
-            update_env_file(target_repo, "POW_SSH_KEY", key_path)
+            update_pow_env(target_repo, "ssh_key", key_path)
             return key_path
 
     # If none validated, fall back to the first one with a warning
@@ -177,7 +179,7 @@ def setup_github_ssh_mode(target_repo="."):
     print("   ⚠️  None of the discovered keys could validate against GitHub.")
     print(f"      Falling back to: {fallback}")
     print("      Ensure this key is added to your GitHub account before pushing.")
-    update_env_file(target_repo, "POW_SSH_KEY", fallback)
+    update_pow_env(target_repo, "ssh_key", fallback)
     return fallback
 
 

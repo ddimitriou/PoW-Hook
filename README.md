@@ -53,7 +53,7 @@ Before installing or running PoW-Hook, ensure you have the following requirement
 3. **Repository Setup**:
    - A valid GitHub repository slug.
 
-These environment variables must be properly configured in your local `.env` file (see the Developer Configuration section).
+The `POW` environment variable must be properly configured in your local `.env` file (see the Developer Configuration section).
 
 ---
 
@@ -63,7 +63,7 @@ These environment variables must be properly configured in your local `.env` fil
 
 Run once per repository to choose the enforcement backend. You can pass an optional target directory to install the configuration in a different project.
 
-Add in your desired `POW_CHECKS_CMD` command that runs the checks you need to perform (the default is `trufflehog`).
+Add your desired `checks_cmd` to the `POW` JSON configuration (the default is `trufflehog`).
 
 ```bash
 python3 admin_install.py [TARGET_DIR]
@@ -72,11 +72,11 @@ python3 admin_install.py [TARGET_DIR]
 - **Option 1 — GitHub Actions**: Scaffolds `.github/workflows/` and `.github/scripts/` from `admin_templates/github/`.
 - **Option 2 — GitHub Enterprise**: Deploys the `pre-receive` hook from `admin_templates/pre-receive_hook/`.
 
-Both options write a `.pow-config.json` file that the local hooks read to determine verification mode. Commit this file to the repository, and push it to the remote.
+Both options scaffold the necessary files. Commit the `.github/` directory to the repository and push it to the remote.
 
 ### 2. Developer Onboarding
 
-Modify the `.env.sample` file and add in your desired `POW_CHECKS_CMD` command which should be the same as in the `Administration Setup` step.
+Copy `.env.example` to `.env` and configure the `POW` JSON variable with your desired `checks_cmd` (should match the value in the workflow YAML).
 
 
 For each developer this should be installed locally in their repository. You can pass an optional target repository path. 
@@ -94,58 +94,67 @@ The key used for signing must be [registered on the developer's GitHub account](
 
 ### 3. Bootstrap the Repository (two-commit setup)
 
-The validator runs on every push to `main`. The very first push — which delivers the workflow file itself — has no PoW trailers yet, so it would fail its own check. PoW-Hook handles this with a `POW_ENFORCE` flag embedded directly in the workflow YAML (not a repository secret), making it tamper-evident: changing it back to `"false"` would itself require passing enforcement.
+The validator runs on every push to `main`. The very first push — which delivers the workflow file itself — has no PoW trailers yet, so it would fail its own check. PoW-Hook handles this with an `enforce` flag inside the `POW` JSON embedded directly in the workflow YAML (not a repository secret), making it tamper-evident: changing it back to `"false"` would itself require passing enforcement.
 
 **Steps:**
 
-1. Run `admin_install.py` — it scaffolds `.github/workflows/pow-validator.yml` with `POW_ENFORCE: "false"`.
-2. Commit `.pow-config.json` and the `.github/` directory and push to `main` *(no hooks needed yet)*.
-3. Confirm the `verify-pow` workflow run succeeds and prints `⚠️ POW_ENFORCE is not "true" — validation is disabled`.
+1. Run `admin_install.py` — it scaffolds `.github/workflows/pow-validator.yml` with `"enforce": "false"` in the `POW` JSON.
+2. Commit the `.github/` directory and push to `main` *(no hooks needed yet)*.
+3. Confirm the `verify-pow` workflow run succeeds and prints `⚠️ enforce is not "true" in POW — validation is disabled`.
 4. Run `./install.sh` to install local hooks on every developer machine.
-5. Open `.github/workflows/pow-validator.yml`, change `POW_ENFORCE: "false"` → `POW_ENFORCE: "true"`, and commit **with hooks running** (this commit gets a valid PoW signature).
+5. Open `.github/workflows/pow-validator.yml`, change `"enforce": "false"` → `"enforce": "true"` in the `POW` JSON, and commit **with hooks running** (this commit gets a valid PoW signature).
 6. Push — the validator now enforces signatures on every subsequent commit.
 
 From step 5 onward, every commit must carry a valid PoW signature.
 
 > [!NOTE]
-> **Why this is self-reinforcing:** `POW_ENFORCE` lives in the workflow file, not in repository secrets. Reverting it to `"false"` is itself a commit that must pass PoW validation — so enforcement cannot be silently disabled by anyone without leaving a traceable, signed commit in the repository history.
+> **Why this is self-reinforcing:** `enforce` lives in the `POW` JSON inside the workflow file, not in repository secrets. Reverting it to `"false"` is itself a commit that must pass PoW validation — so enforcement cannot be silently disabled by anyone without leaving a traceable, signed commit in the repository history.
 
 ### 4. GitHub Repository Secrets
 
 | Secret               | Description                                                         |
 |----------------------|---------------------------------------------------------------------|
 | `GITHUB_TOKEN`       | Auto-provided by GitHub Actions — no manual setup required          |
-| `POW_ADMIN_HANDLES`  | *(Optional)* Space-separated `@handles` to tag on PR violations     |
-| `POW_GITHUB_API_URL` | *(Optional)* Override GitHub API base URL (GitHub Enterprise Server) |
+| `POW_ADMIN_HANDLES`  | *(Optional)* Space-separated `@handles` to tag on PR violations (injected into `POW` JSON in the workflow) |
+| `POW_GITHUB_API_URL` | *(Optional)* Override GitHub API base URL for Enterprise Server (injected into `POW` JSON in the workflow) |
 
 No developer public keys need to be stored as secrets — they are resolved at runtime from each committer's GitHub profile.
 
-### 5. GitHub Workflow Setup (`POW_CHECKS_CMD`)
+### 5. GitHub Workflow Setup (`POW` env var)
 
 The server-side validator cryptographically strictly enforces that the developer ran the *exact* required checks.
-In `.github/workflows/pow-validator.yml` and `.github/workflows/pow-ledger.yml`, ensure the `POW_CHECKS_CMD` environment variable is defined and matches the client's command string literally:
+In `.github/workflows/pow-validator.yml`, ensure the `POW` environment variable contains a JSON object with `checks_cmd` matching the client's command string literally:
 
 ```yaml
 env:
-  POW_CHECKS_CMD: 'docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
+  POW: >-
+    {
+      "checks_cmd": "docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail",
+      "enforce": "true"
+    }
 ```
 
 We're using [trufflehog](https://github.com/trufflesecurity/trufflehog) as the sample secret key search mechanism.
 
 ### 6. Developer `.env` Configuration
 
+All configuration is set via a single `POW` environment variable containing a JSON object:
+
 ```env
-# Command to run before signing (e.g., linters, secret scanners)
-POW_CHECKS_CMD="docker run --rm -v $(pwd):/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail"
-
-# Required for server-side attestation (GitHub Actions mode only):
-# A GitHub Personal Access Token with 'actions' scope to trigger workflow_dispatch events.
-# GITHUB_PAT_LOCAL="ghp_..."
-
-# Required for server-side attestation (GitHub Actions mode only):
-# The owner/repo slug of this repository (e.g., "ddimitriou/pow-hook").
-# POW_GITHUB_REPO="owner/repo"
+POW='{"checks_cmd":"docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail","github_pat_local":"ghp_...","github_repo":"owner/repo"}'
 ```
+
+| Key | Description |
+|-----|-------------|
+| `checks_cmd` | Command to run before signing (e.g., linters, secret scanners) |
+| `github_pat_local` | GitHub PAT with `actions` scope (server-side attestation) |
+| `github_repo` | `owner/repo` slug for attestation dispatch |
+| `ssh_key` | Path to SSH private key (auto-detected by `setup_hooks.py`) |
+| `admin_handles` | Space-separated `@handles` for PR violation notifications |
+| `enforce` | Set to `"true"` to enable server-side enforcement |
+| `github_api_url` | Override GitHub API base URL (Enterprise Server) |
+| `github_token` | GitHub token for pre-receive hook (Enterprise) |
+| `ssh_key_override` | Override SSH key path for testing/CI |
 
 ---
 
@@ -154,7 +163,7 @@ POW_CHECKS_CMD="docker run --rm -v $(pwd):/pwd trufflesecurity/trufflehog:latest
 When the server-side validator detects an invalid, fraudulent, or missing PoW signature on a pushed branch:
 1. It **obliterates** the unverified commits natively by force-pushing the branch back to the last known perfectly verified commit state.
 2. If there are any open **Pull Requests** attached to the compromised branch, it automatically closes them.
-3. It tags administrative handles (configured via `POW_ADMIN_HANDLES`) in the closed PR comments, notifying them of the breach.
+3. It tags administrative handles (configured via `admin_handles` in the `POW` JSON) in the closed PR comments, notifying them of the breach.
 
 > [!WARNING]
 > **Manual Hard-Deletion Required**

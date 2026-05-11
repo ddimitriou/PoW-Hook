@@ -10,7 +10,7 @@
 #
 # Flow:
 #   1. Generate a test Ed25519 SSH keypair
-#   2. Set up a fresh repo with POW_CHECKS_CMD pointing at trufflehog
+#   2. Set up a fresh repo with checks_cmd pointing at trufflehog
 #   3. Install hooks
 #   4. Stage a file containing a fake GitHub PAT
 #   5. Attempt a normal commit → trufflehog must BLOCK it        (CHECK 1)
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 # Use the project's virtual environment if available, otherwise fallback to system python
-VENV_PYTHON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python"
+VENV_PYTHON="$HOME/.pow-hook/venv/bin/python"
 if [ -f "$VENV_PYTHON" ]; then
     PYTHON="$VENV_PYTHON"
 else
@@ -38,6 +38,8 @@ docker image inspect trufflesecurity/trufflehog:latest >/dev/null 2>&1 \
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
+
+TRUFFLEHOG_CMD='docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
 
 cleanup() {
     set +euo pipefail
@@ -69,15 +71,11 @@ cp -r "$PRJ_ROOT"/admin_templates .
 cp "$PRJ_ROOT"/setup_hooks.py .
 cp "$PRJ_ROOT"/.env.example .
 
-cat > .pow-config.json <<'EOF'
-{"key_source": "github"}
-EOF
-
-# POW_CHECKS_CMD: trufflehog scans the working tree for secrets.
+# checks_cmd: trufflehog scans the working tree for secrets.
 # --no-verification: pattern-match only (no live API calls).
 # --fail: exit non-zero when detections are found.
-cat > .env <<'EOF'
-POW_CHECKS_CMD=docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail
+cat > .env <<EOF
+POW='{"checks_cmd":"$TRUFFLEHOG_CMD"}'
 EOF
 
 # Set up a bare remote so verify_pow.py's cleanup-push completes cleanly
@@ -93,12 +91,11 @@ export PYTHONUTF8=1
 $PYTHON setup_hooks.py
 
 # Baseline commit — admin setup, no PoW check needed
-git add .pow-config.json
-git commit --no-verify -m "chore: add pow config"
+git add .
+git commit --no-verify -m "chore: initial setup"
 INITIAL_COMMIT=$(git rev-parse HEAD)
 git push -u origin main --quiet
 
-export POW_ENFORCE=true
 # ---------------------------------------------------------------------------
 # CHECK 1: Trufflehog blocks secret commit locally
 # ---------------------------------------------------------------------------
@@ -152,7 +149,7 @@ GITHUB_REPOSITORY=owner/repo \
 GITHUB_EVENT_NAME=push \
 GITHUB_EVENT_PATH="$TEST_DIR/bypass_event.json" \
 GITHUB_REF=refs/heads/main \
-POW_CHECKS_CMD='docker run --rm -v "$(git rev-parse --show-toplevel)":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail' \
+POW='{"enforce":"true","checks_cmd":"'"$TRUFFLEHOG_CMD"'"}' \
 $PYTHON admin_templates/github/scripts/verify_pow.py 2>&1
 CHECK2_EXIT=$?
 set -e
