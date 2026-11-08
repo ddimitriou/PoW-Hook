@@ -1,109 +1,11 @@
 #!/usr/bin/env python3
-import subprocess
-import sys
+"""PoW-Hook pre-merge-commit: same session flow as pre-commit, for merge commits."""
 import os
-import uuid
-import json
-import urllib.request
-import urllib.error
-import hashlib
+import sys
 
-def load_env():
-    try:
-        repo_root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
-        env_path = os.path.join(repo_root, ".env")
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    if "=" in line and not line.strip().startswith("#"):
-                        key, val = line.strip().split("=", 1)
-                        val = val.strip().strip("'\"")
-                        if key not in os.environ:
-                            os.environ[key] = val
-    except Exception:
-        pass
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-
-def load_pow_config():
-    """Parse the POW environment variable as a JSON object."""
-    raw = os.environ.get("POW", "{}")
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
-def dispatch_attestation(session_id, tree_hash, state, pow_checks_hash, cfg):
-    """Fire a workflow_dispatch event to the PoW Attestation Ledger."""
-    pat = cfg.get("github_pat_local", "")
-    repo = cfg.get("github_repo", "")
-
-    if not pat or not repo:
-        print("⚠️  github_pat_local or github_repo not set in POW — skipping server-side attestation.")
-        return False
-
-    url = f"https://api.github.com/repos/{repo}/actions/workflows/pow-ledger.yml/dispatches"
-    payload = json.dumps({
-        "ref": "main",
-        "inputs": {
-            "session_id": session_id,
-            "tree_hash": tree_hash,
-            "pow_checks_hash": pow_checks_hash,
-            "state": state,
-        }
-    }).encode()
-
-    req = urllib.request.Request(url, data=payload, headers={
-        "Authorization": f"Bearer {pat}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-    })
-
-    try:
-        urllib.request.urlopen(req)
-        print(f"📡 Attestation dispatched: session={session_id[:8]}… state={state}")
-        return True
-    except urllib.error.HTTPError as e:
-        print(f"⚠️  Attestation dispatch failed ({e.code}): {e.read().decode()}")
-        return False
-
-def run_custom_checks(cfg):
-    check_cmd = cfg.get("checks_cmd", "")
-    if not check_cmd:
-        print("✨ No custom checks defined (set checks_cmd in POW to run them).")
-        return True
-
-    print(f"✨ Running custom checks: {check_cmd}")
-    try:
-        subprocess.check_call(check_cmd, shell=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Custom checks failed with exit code {e.returncode}.")
-        return False
+from pow_client import run_session  # noqa: E402
 
 if __name__ == "__main__":
-    load_env()
-    cfg = load_pow_config()
-
-    session_id = str(uuid.uuid4())
-    tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
-
-    check_cmd = cfg.get("checks_cmd", "").strip()
-    if not check_cmd:
-        check_cmd = "none"
-    pow_checks_hash = hashlib.sha256(check_cmd.encode()).hexdigest()
-
-    dispatch_attestation(session_id, tree_hash, "STARTED", pow_checks_hash, cfg)
-
-    passed = run_custom_checks(cfg)
-
-    status = "PASSED" if passed else "FAILED"
-    dispatch_attestation(session_id, tree_hash, status, pow_checks_hash, cfg)
-
-    if passed:
-        with open(".git/POW_PASSED", "w") as f:
-            json.dump({"session_id": session_id, "status": status, "pow_checks_hash": pow_checks_hash}, f)
-        sys.exit(0)
-    else:
-        print("❌ Quality checks failed. Merge aborted.")
-        sys.exit(1)
+    sys.exit(run_session("Merge"))

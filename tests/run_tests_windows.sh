@@ -2,7 +2,8 @@
 # ---------------------------------------------------------------------------
 # Run the unit test suite inside a Docker container (Linux environment).
 # Required because git hooks with Python shebangs only execute correctly on Linux.
-# Usage: bash tests/run_tests_windows.sh
+# Builds tests/Dockerfile.test once (cached) and mounts the project read-write.
+# Usage: bash tests/run_tests_windows.sh [extra pytest args]
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -12,25 +13,17 @@ PRJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Convert project root to a Windows-style drive path (C:/...) for the Docker
 # -v mount on Windows.  On Linux/macOS this is a no-op.
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-    WIN_DIR="$(cygpath -w "$PRJ_ROOT" | sed 's|\\|/|g')"
+    WIN_DIR="$(cygpath -m "$PRJ_ROOT")"
 else
     WIN_DIR="$PRJ_ROOT"
 fi
 
-echo "🐳 Running unit tests inside Docker (ubuntu:22.04)..."
+echo "🐳 Building test image (ubuntu:22.04 + python3 + cryptography + pytest)..."
+docker build -q -f "$SCRIPT_DIR/Dockerfile.test" -t pow-hook-tests "$PRJ_ROOT" >/dev/null
+
+echo "🐳 Running unit tests inside Docker..."
 MSYS_NO_PATHCONV=1 docker run --rm \
     -v "${WIN_DIR}://work" \
     -w //work \
-    --network host \
-    ubuntu:22.04 bash -c '
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq && apt-get install -y -qq python3 python3-pip git openssh-client 2>/dev/null
-        pip3 install -q cryptography pytest 2>/dev/null
-
-        git config --global init.defaultBranch master
-        git config --global user.email "ci@test.com"
-        git config --global user.name  "CI"
-
-        python3 -m pytest tests/test_hooks.py -v --tb=short 2>&1
-    '
+    pow-hook-tests \
+    python3 -m pytest tests/test_hooks.py -v --tb=short -p no:cacheprovider "$@"

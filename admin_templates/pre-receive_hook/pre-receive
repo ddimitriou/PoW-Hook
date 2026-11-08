@@ -2,45 +2,131 @@
 """
 PoW-Hook Pre-Receive Hook (GitHub Enterprise / Self-Hosted)
 
-Verifies the Ed25519/RSA SSH signature (tree_hash|session_id|status) on every
-commit in a push against the committer's registered GitHub SSH keys.
-This is the server-side equivalent of verify_pow.py — it does NOT query the
-GitHub Artifacts API because it runs on the server itself.
+Verifies the SSH signature on every commit in a push against the pusher's
+registered GitHub SSH keys.  This is the server-side equivalent of
+verify_pow.py.  It does NOT query the Artifacts API (no ledger on GHE), so it
+checks the trailer structure, status byte, command hash, lineage anchor and
+signature only.
+
+This file is deployed as a single standalone script, so the trailer codec is
+inlined here.  Keep it in sync with admin_templates/github/scripts/pow_trailer.py.
+
+Configuration: the POW environment variable (JSON) with
+  github_token, github_api_url, checks_cmd, allow_v1 (default "true").
+GHE injects GITHUB_USER_LOGIN (the pusher).
 """
-import sys
-import subprocess
-import os
 import base64
-import json
 import hashlib
+import json
+import os
+import struct
+import subprocess
+import sys
 import urllib.request
+import uuid as uuid_mod
+
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives import serialization
 
+for _stream in (sys.stdout, sys.stderr):  # emoji-safe output on non-UTF-8 consoles
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
 
-def load_pow_config():
-    """Parse the POW environment variable as a JSON object."""
-    raw = os.environ.get("POW", "{}")
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
+ZERO_SHA = "0" * 40
+TRAILER_V1, TRAILER_V2 = 0x01, 0x02
+STATUS_NAMES = {0: "FAILED", 1: "PASSED"}
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+def load_pow_config():
+    """Parse the POW environment variable as a JSON object."""
+    raw = os.environ.get("POW", "") or "{}"
+    try:
+        cfg = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def truthy(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def git(*args):
+    return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL).decode().strip()
+
+
 def github_api_request(path, token, api_base):
-    """Make an authenticated GET request to the GitHub API."""
     url = f"{api_base.rstrip('/')}/{path.lstrip('/')}"
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "pow-hook",
     })
-    resp = urllib.request.urlopen(req)
+    resp = urllib.request.urlopen(req, timeout=30)
     return json.loads(resp.read().decode())
+
+
+def decode_pow_trailer(b64_value):
+    """Strict decoder for legacy-JSON / v1 / v2 trailers.  Returns a dict; raises ValueError."""
+    packed = base64.b64decode(b64_value, validate=True)
+    if not packed:
+        raise ValueError("empty trailer")
+    if packed[:1] == b"{":
+        bundle = json.loads(packed.decode())
+        sig = base64.b64decode(bundle["token"], validate=True)
+        status = str(bundle["status"])
+        if status not in STATUS_NAMES.values() or not sig:
+            raise ValueError("malformed legacy trailer")
+        return {"version": TRAILER_V1, "sig": sig, "session": str(uuid_mod.UUID(str(bundle["session"]))),
+                "status": status, "cmd_hash": str(bundle["checks_hash"]).lower(),
+                "challenge_id": None, "receipt": None, "anchor": None}
+    if packed[0] not in (TRAILER_V1, TRAILER_V2):
+        raise ValueError("unknown trailer version")
+    version = packed[0]
+    offset = 1
+
+    def take(n):
+        nonlocal offset
+        chunk = packed[offset:offset + n]
+        if len(chunk) != n:
+            raise ValueError("truncated trailer")
+        offset += n
+        return chunk
+
+    sig_len = struct.unpack(">H", take(2))[0]
+    sig = take(sig_len)
+    if not sig:
+        raise ValueError("empty signature")
+    session = str(uuid_mod.UUID(bytes=take(16)))
+    status_byte = take(1)[0]
+    if status_byte not in STATUS_NAMES:
+        raise ValueError("unknown status byte")
+    status = STATUS_NAMES[status_byte]
+    cmd_hash = take(32).hex()
+    challenge_id = receipt = anchor = None
+    if version == TRAILER_V2:
+        challenge_id = str(uuid_mod.UUID(bytes=take(16)))
+        receipt = take(32).hex()
+        anchor = take(20).hex()
+    if offset != len(packed):
+        raise ValueError("trailing bytes")
+    return {"version": version, "sig": sig, "session": session, "status": status,
+            "cmd_hash": cmd_hash, "challenge_id": challenge_id, "receipt": receipt, "anchor": anchor}
+
+
+def sign_payload(t, tree_hash):
+    base = f"{t['cmd_hash']}|{tree_hash}|{t['session']}|{t['status']}"
+    if t["version"] == TRAILER_V1:
+        return base.encode()
+    return f"{base}|{t['challenge_id']}|{t['receipt']}|{t['anchor']}".encode()
 
 
 # ---------------------------------------------------------------------------
@@ -48,28 +134,17 @@ def github_api_request(path, token, api_base):
 # ---------------------------------------------------------------------------
 
 def get_github_ssh_keys(username, token, api_base):
-    """Fetch the SSH public keys registered on a GitHub user's account."""
+    """Returns (keys, error).  error is set when the API could not be queried."""
     try:
         data = github_api_request(f"/users/{username}/keys", token, api_base)
-        return [k["key"] for k in data]
+        return [k["key"] for k in data], None
     except Exception as e:
-        print(f"   ⚠️  Could not fetch SSH keys for {username}: {e}")
-        return []
+        return [], str(e)
 
 
-def verify_with_github_keys(sig_raw, payload_bytes, username, token, api_base):
-    """
-    Try every SSH key registered on GitHub for username.
-    Supports RSA (PKCS1v15/SHA-256) and Ed25519.
-    Returns True if any key matches.
-    """
+def verify_with_keys(sig_raw, payload_bytes, ssh_keys):
     from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-    ssh_keys = get_github_ssh_keys(username, token, api_base)
-    if not ssh_keys:
-        return False
-
     from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PublicKey
     from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey, ECDSA
 
@@ -95,66 +170,71 @@ def verify_with_github_keys(sig_raw, payload_bytes, username, token, api_base):
 # ---------------------------------------------------------------------------
 
 def verify_push(old_rev, new_rev, gh_token, api_base, pusher, cfg):
-    expected_cmd = cfg.get("checks_cmd", "none")
+    expected_cmd = (cfg.get("checks_cmd") or "none").strip() or "none"
     expected_hash = hashlib.sha256(expected_cmd.encode()).hexdigest()
-    
-    cmd = ["git", "log", f"{old_rev}..{new_rev}", "--format=%H"]
+    allow_v1 = truthy(cfg.get("allow_v1"), default=True)
+
+    range_spec = new_rev if old_rev == ZERO_SHA else f"{old_rev}..{new_rev}"
     try:
-        output = subprocess.check_output(cmd).decode().strip()
+        output = git("log", range_spec, "--format=%H")
     except subprocess.CalledProcessError:
         return True
-
     if not output:
         return True
 
-    commits = output.splitlines()
-    for commit_hash in commits:
-        pow_checks_b64 = subprocess.check_output([
-            "git", "log", "-1",
-            "--format=%(trailers:key=PoW-Checks,valueonly)",
-            commit_hash
-        ]).decode().strip()
+    if not gh_token:
+        print("❌ Server error: github_token is required in POW for GitHub SSH key mode.")
+        return False
+    if not pusher:
+        print("❌ Server error: GITHUB_USER_LOGIN is not set — cannot resolve pusher's SSH keys.")
+        return False
 
-        tree_hash = subprocess.check_output([
-            "git", "log", "-1", "--format=%T", commit_hash
-        ]).decode().strip()
+    keys, err = get_github_ssh_keys(pusher, gh_token, api_base)
+    if err:
+        print(f"❌ Could not fetch SSH keys for {pusher} ({err}); refusing push (inconclusive).")
+        return False
+    if not keys:
+        print(f"❌ GitHub user {pusher} has no registered SSH keys.")
+        return False
 
+    for commit_hash in output.splitlines():
+        raw = git("log", "-1", "--format=%(trailers:key=PoW-Checks,valueonly)", commit_hash)
+        # git < 2.22 echoes the %(trailers:key=...) format back; treat that as "no trailer".
+        pow_checks_b64 = next((ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.strip().startswith("%(")), "")
         if not pow_checks_b64:
             print(f"❌ Commit {commit_hash} is missing required PoW-Checks trailer.")
             return False
-            
         try:
-            bundle_json = base64.b64decode(pow_checks_b64).decode()
-            bundle = json.loads(bundle_json)
-            token = bundle["token"]
-            session = bundle["session"]
-            status = bundle["status"]
-            cmd_hash = bundle["checks_hash"]
-        except Exception:
-            print(f"❌ Commit {commit_hash} PoW-Checks trailer is not valid base64 JSON.")
+            t = decode_pow_trailer(pow_checks_b64)
+        except Exception as e:
+            print(f"❌ Commit {commit_hash} PoW-Checks trailer is not valid ({e}).")
             return False
-            
-        if cmd_hash != expected_hash:
+
+        if t["version"] == TRAILER_V1 and not allow_v1:
+            print(f"❌ Commit {commit_hash} carries a v1 trailer but allow_v1 is not true.")
+            return False
+        if t["cmd_hash"] != expected_hash:
             print(f"❌ Commit {commit_hash} used incorrect checks_cmd (hash mismatch).")
             return False
-
-        sign_payload = f"{cmd_hash}|{tree_hash}|{session}|{status}"
-
-        try:
-            sig_raw = base64.b64decode(token)
-        except Exception:
-            print(f"❌ Signature for commit {commit_hash} is not valid base64.")
+        if t["status"] != "PASSED":
+            print(f"❌ Commit {commit_hash} attestation status is {t['status']}, not PASSED.")
             return False
 
-        if not gh_token:
-            print("❌ Server error: github_token is required for GitHub SSH key mode.")
-            return False
-        if not pusher:
-            print("❌ Server error: GITHUB_USER_LOGIN is not set — cannot resolve pusher's SSH keys.")
-            return False
-        valid = verify_with_github_keys(sig_raw, sign_payload.encode(), pusher, gh_token, api_base)
-        if valid:
-            print(f"✅ Commit {commit_hash} verified via GitHub SSH keys of {pusher}.")
+        tree_hash = git("log", "-1", "--format=%T", commit_hash)
+        if t["version"] == TRAILER_V2:
+            parents = git("log", "-1", "--format=%P", commit_hash).split()
+            first_parent = parents[0] if parents else None
+            grand_parent = None
+            if first_parent:
+                gp = git("log", "-1", "--format=%P", first_parent).split()
+                grand_parent = gp[0] if gp else None
+            allowed = {first_parent or ZERO_SHA, grand_parent or ZERO_SHA}
+            if t["anchor"] not in allowed:
+                print(f"❌ Commit {commit_hash} trailer anchor does not match its lineage (replayed trailer?).")
+                return False
+
+        if verify_with_keys(t["sig"], sign_payload(t, tree_hash), keys):
+            print(f"✅ Commit {commit_hash} verified via GitHub SSH keys of {pusher} (trailer v{t['version']}).")
         else:
             print(f"❌ No matching GitHub SSH key for commit {commit_hash} (pusher: {pusher}).")
             return False
@@ -164,22 +244,18 @@ def verify_push(old_rev, new_rev, gh_token, api_base, pusher, cfg):
 
 def main():
     cfg = load_pow_config()
+    gh_token = cfg.get("github_token", "")
+    api_base = cfg.get("github_api_url") or "https://api.github.com"
+    pusher = os.environ.get("GITHUB_USER_LOGIN")
 
-    # GitHub Enterprise injects the pusher's login and the API base URL.
-    gh_token  = cfg.get("github_token", "")
-    api_base  = cfg.get("github_api_url", "https://api.github.com")
-    pusher    = os.environ.get("GITHUB_USER_LOGIN")
-
-    # Read the first ref to determine config (all refs in a single push share a repo).
     lines = sys.stdin.read().strip().splitlines()
     if not lines:
         sys.exit(0)
 
     for line in lines:
         old, new, ref = line.split()
-        if new == "0000000000000000000000000000000000000000":
+        if new == ZERO_SHA:
             continue
-
         if not verify_push(old, new, gh_token, api_base, pusher, cfg):
             print("-------------------------------------------------------")
             print("REJECTED: One or more commits bypassed local hooks.")

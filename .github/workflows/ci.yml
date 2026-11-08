@@ -71,8 +71,8 @@ jobs:
         run: python -m pytest tests/test_hooks.py -v --tb=short
 
   # ---------------------------------------------------------------------------
-  # Job 2: E2E – GitHub SSH key verification
-  # Calls verify_pow.py directly against a local mock GitHub API server.
+  # Job 2: E2E – GitHub SSH key verification + challenge protocol
+  # Calls verify_pow.py directly against a local mock GitHub API / ledger.
   # ---------------------------------------------------------------------------
   e2e-github-ssh:
     name: "E2E: GitHub SSH verification"
@@ -100,14 +100,14 @@ jobs:
         run: bash tests/test_ci_github_ssh.sh
 
   # ---------------------------------------------------------------------------
-  # Job 3: E2E – Trufflehog secret scan (Docker for scan)
-  # Exercises the pre-commit hook and then calls verify_pow.py directly.
+  # Job 3: E2E – real trufflehog (pinned): local scan, challenge minting
+  # determinism, bypass rejection, nightly sweep.
   # ---------------------------------------------------------------------------
   e2e-trufflehog:
     name: "E2E: Trufflehog scan"
     runs-on: ubuntu-latest
     needs: unit-tests
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -123,8 +123,8 @@ jobs:
           git config --global user.email "ci@test.com"
           git config --global user.name  "CI"
 
-      - name: Pull trufflehog image
-        run: docker pull trufflesecurity/trufflehog:latest
+      - name: Pull pinned trufflehog image
+        run: docker pull trufflesecurity/trufflehog:3.99.8
 
       - name: Run Trufflehog E2E test
         env:

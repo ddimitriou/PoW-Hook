@@ -101,7 +101,7 @@ EOF
 
 # Scaffold .github/scripts from admin_templates
 mkdir -p .github/scripts .github/workflows
-cp admin_templates/github/scripts/verify_pow.py  .github/scripts/
+cp admin_templates/github/scripts/*.py .github/scripts/
 
 # Write a debug helper script that runs inside the act container to diagnose
 # signature verification issues (avoids YAML heredoc / << merge-key problems).

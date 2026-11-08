@@ -11,8 +11,11 @@ jobs:
   verify-pow:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      # contents: read is enough to verify.  Raise to "write" ONLY if you also
+      # set "auto_revert": "true" below (force-reset on confirmed forgeries).
+      contents: read
       actions: read
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -30,11 +33,33 @@ jobs:
       - name: Verify Proof-of-Work Tokens
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ---------------------------------------------------------------
+          # All settings live in the single POW JSON object.
+          #   checks_cmd   must match the developers' checks_cmd byte-for-byte
+          #                (its SHA-256 is compared).  Keep the scanner pinned.
+          #   enforce      ships as "false" so the initial setup push passes;
+          #                change to "true" on your second commit (made with
+          #                hooks running) to enable enforcement.
+          #   allow_v1     accept v1 / legacy trailers (no challenge receipt)
+          #                during the migration window; set "false" once every
+          #                developer runs the v2 hooks.
+          #   auto_revert  force-reset the branch on cryptographically confirmed
+          #                forgeries (requires contents: write above).
+          #                Inconclusive / policy failures never rewrite refs.
+          #   ledger_ref   ref pow-ledger.yml is dispatched on; challenges
+          #                minted elsewhere are rejected.
+          #   hmac_key     secret shared with pow-ledger.yml; generate with
+          #                python3 -c "import secrets; print(secrets.token_hex(32))"
+          # ---------------------------------------------------------------
           POW: >-
             {
-              "checks_cmd": "docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail",
+              "checks_cmd": "docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:3.99.8 filesystem /pwd --no-verification --fail",
               "enforce": "false",
+              "allow_v1": "true",
+              "auto_revert": "false",
+              "ledger_ref": "main",
               "admin_handles": "${{ secrets.POW_ADMIN_HANDLES }}",
-              "github_api_url": "${{ secrets.POW_GITHUB_API_URL }}"
+              "github_api_url": "${{ secrets.POW_GITHUB_API_URL }}",
+              "hmac_key": "${{ secrets.POW_HMAC_KEY }}"
             }
         run: python3 .github/scripts/verify_pow.py

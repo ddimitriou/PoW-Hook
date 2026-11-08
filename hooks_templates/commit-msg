@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
-import sys
+"""
+PoW-Hook commit-msg: sign the session recorded by pre-commit and inject the
+PoW-Checks trailer (v2 when a challenge receipt is present, v1 otherwise).
+
+Configuration (POW JSON env var / .env): ssh_key, ssh_key_override.
+"""
+import json
 import os
 import subprocess
-import base64
-import json
+import sys
+
+for _stream in (sys.stdout, sys.stderr):  # emoji-safe output on cp1252 consoles (Windows hooks)
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from pow_trailer import ZERO_SHA, TRAILER_KEY, build_sign_payload, encode_pow_trailer, load_pow_config  # noqa: E402
+
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
@@ -12,7 +26,6 @@ from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PrivateKey
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePrivateKey, ECDSA
 
 msg_file = sys.argv[1]
-passed_flag = ".git/POW_PASSED"
 
 
 def load_env():
@@ -31,32 +44,18 @@ def load_env():
         pass
 
 
-def load_pow_config():
-    """Parse the POW environment variable as a JSON object."""
-    raw = os.environ.get("POW", "{}")
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
 def find_ssh_key(cfg):
     """Return the SSH private key path used for github.com connections."""
-    # Priority 1: Specifically configured key from setup
     env_key = cfg.get("ssh_key", "")
     if env_key and os.path.exists(env_key):
         return env_key
 
-    # Priority 2: Test/CI override
-    override = cfg.get("ssh_key_override", "")
+    override = cfg.get("ssh_key_override", "") or os.environ.get("POW_SSH_KEY_OVERRIDE", "")
     if override and os.path.exists(override):
         return override
 
-    # Priority 3: Resolve via ssh -G
     try:
-        out = subprocess.check_output(
-            ["ssh", "-G", "github.com"], stderr=subprocess.DEVNULL
-        ).decode()
+        out = subprocess.check_output(["ssh", "-G", "github.com"], stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():
             if line.startswith("identityfile "):
                 path = os.path.expanduser(line.split(None, 1)[1])
@@ -65,7 +64,6 @@ def find_ssh_key(cfg):
     except Exception:
         pass
 
-    # Priority 4: Default candidates
     for candidate in ["~/.ssh/id_rsa", "~/.ssh/id_ed25519", "~/.ssh/id_ecdsa"]:
         path = os.path.expanduser(candidate)
         if os.path.exists(path):
@@ -74,7 +72,6 @@ def find_ssh_key(cfg):
 
 
 def load_private_key(key_path):
-    """Load a private key from file, handling both OpenSSH and legacy PEM formats."""
     with open(key_path, "rb") as f:
         key_data = f.read()
     if b"OPENSSH PRIVATE KEY" in key_data:
@@ -83,72 +80,82 @@ def load_private_key(key_path):
 
 
 def sign_with_key(private_key, payload_bytes):
-    """Sign payload_bytes with the given private key."""
     if isinstance(private_key, RSAPrivateKey):
         return private_key.sign(payload_bytes, padding.PKCS1v15(), hashes.SHA256())
-    elif isinstance(private_key, (Ed25519PrivateKey, Ed448PrivateKey)):
+    if isinstance(private_key, (Ed25519PrivateKey, Ed448PrivateKey)):
         return private_key.sign(payload_bytes)
-    elif isinstance(private_key, EllipticCurvePrivateKey):
+    if isinstance(private_key, EllipticCurvePrivateKey):
         return private_key.sign(payload_bytes, ECDSA(hashes.SHA256()))
     raise ValueError(f"Unsupported key type: {type(private_key).__name__}")
 
 
-load_env()
-cfg = load_pow_config()
+def anchor_sha():
+    """First parent of HEAD (see pow_trailer.py for why not HEAD itself)."""
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--verify", "-q", "HEAD~1"],
+                                       stderr=subprocess.DEVNULL).decode().strip() or ZERO_SHA
+    except subprocess.CalledProcessError:
+        return ZERO_SHA
 
-if os.path.exists(passed_flag):
-    with open(passed_flag, "r") as f:
-        session_data = json.load(f)
+
+def main():
+    load_env()
+    cfg = load_pow_config()
+    git_dir = os.path.abspath(subprocess.check_output(["git", "rev-parse", "--git-dir"]).decode().strip())
+    passed_flag = os.path.join(git_dir, "POW_PASSED")
+
+    if not os.path.exists(passed_flag):
+        print("⚠️ Warning: No Proof-of-Work checks executed. Push will be rejected by backend.")
+        return 0
+
+    with open(passed_flag) as f:
+        session = json.load(f)
     os.remove(passed_flag)
 
-    session_id = session_data["session_id"]
-    status = session_data["status"]
-    pow_checks_hash = session_data.get("pow_checks_hash", "")
+    session_id = session["session_id"]
+    status = session["status"]
+    pow_checks_hash = session.get("pow_checks_hash", "")
+    challenge_id = session.get("challenge_id")
+    receipt = session.get("receipt")
 
     try:
         tree_hash = subprocess.check_output(["git", "write-tree"]).decode().strip()
-        sign_payload = f"{pow_checks_hash}|{tree_hash}|{session_id}|{status}"
+        anchor = anchor_sha() if challenge_id else None
+        payload = build_sign_payload(pow_checks_hash, tree_hash, session_id, status, challenge_id, receipt, anchor)
 
         key_path = find_ssh_key(cfg)
         if not key_path:
             print("❌ Error: No SSH private key found. Run setup_hooks.py again.")
-            sys.exit(1)
+            return 1
         if not cfg.get("ssh_key"):
             print(f"⚠️  ssh_key not set in POW — using auto-detected key: {key_path}")
             print("   Ensure this key is registered at github.com/settings/keys,")
-            print("   or set ssh_key in the POW env var to the correct private key path.")
-
+            print("   or set ssh_key in the POW JSON to the correct private key path.")
         private_key = load_private_key(key_path)
+        sig_bytes = sign_with_key(private_key, payload)
 
-        signature = sign_with_key(private_key, sign_payload.encode())
-        token = base64.b64encode(signature).decode()
-        
-        bundle = json.dumps({
-            "token": token,
-            "session": session_id,
-            "status": status,
-            "checks_hash": pow_checks_hash
-        }, separators=(',', ':'))
-        pow_checks = base64.b64encode(bundle.encode()).decode()
+        trailer_value = encode_pow_trailer(sig_bytes, session_id, status, pow_checks_hash, challenge_id, receipt, anchor)
 
         # Strip comment lines (e.g., from MERGE_MSG) before injecting trailers.
-        # Without this, git interpret-trailers appends trailers after comments;
-        # git then strips the comments and the blank line separator is lost,
-        # so %(trailers:...) can no longer find the trailer block.
-        cleaned = subprocess.check_output(
-            ["git", "stripspace", "--strip-comments"],
-            stdin=open(msg_file, "rb"),
-        )
+        # Otherwise git interpret-trailers appends after the comments, git then
+        # strips the comments and the blank-line separator is lost, so
+        # %(trailers:...) can no longer find the trailer block.
+        with open(msg_file, "rb") as src:
+            cleaned = subprocess.check_output(["git", "stripspace", "--strip-comments"], stdin=src)
         with open(msg_file, "wb") as f:
             f.write(cleaned)
 
         subprocess.check_call([
             "git", "interpret-trailers", "--in-place",
-            "--trailer", f"PoW-Checks: {pow_checks}",
-            msg_file
+            "--trailer", f"{TRAILER_KEY}: {trailer_value}",
+            msg_file,
         ])
+        print(f"🔏 PoW trailer v{2 if challenge_id else 1} injected (session {session_id[:8]}…).")
     except Exception as e:
         print(f"❌ Error: Failed to sign tree or inject trailer: {e}")
-        sys.exit(1)
-else:
-    print("⚠️ Warning: No Proof-of-Work checks executed. Push will be rejected by backend.")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

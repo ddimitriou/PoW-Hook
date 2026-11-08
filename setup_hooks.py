@@ -9,6 +9,12 @@ HOOK_DIR_TPL = ".git/hooks"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "hooks_templates")
 HOOKS_TO_INSTALL = ["pre-commit", "commit-msg", "pre-merge-commit"]
+# Python modules the hooks import; installed next to them in .git/hooks.
+# pow_trailer.py is shared with the server-side scripts (single source of truth).
+MODULES_TO_INSTALL = [
+    ("pow_client.py", TEMPLATE_DIR),
+    ("pow_trailer.py", os.path.join(SCRIPT_DIR, "admin_templates", "github", "scripts")),
+]
 CENTRAL_VENV_DIR = os.path.expanduser("~/.pow-hook/venv")
 
 
@@ -67,6 +73,23 @@ def validate_github_ssh_key(key_path):
     except Exception:
         pass
     return False, None
+
+
+def read_pow_env(target_repo):
+    """Return the POW JSON object stored in the target repo's .env (or {})."""
+    env_path = os.path.join(target_repo, ".env")
+    if not os.path.exists(env_path):
+        return {}
+    with open(env_path, "r") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("POW="):
+                try:
+                    cfg = json.loads(stripped[4:].strip().strip("'\""))
+                    return cfg if isinstance(cfg, dict) else {}
+                except (json.JSONDecodeError, TypeError):
+                    return {}
+    return {}
 
 
 def update_pow_env(target_repo, key, value):
@@ -134,6 +157,11 @@ def ensure_central_venv():
 
 def resolve_best_python():
     """Return the best Python interpreter path (central venv preferred)."""
+    # Explicit override (CI / tests): use this interpreter, skip venv creation.
+    override = os.environ.get("POW_HOOK_PYTHON")
+    if override and os.path.exists(override):
+        return override
+
     # Prefer the central venv to ensure consistency across all hook installations
     central_python = ensure_central_venv()
     if central_python:
@@ -245,6 +273,17 @@ def install():
 
         st = os.stat(dst)
         os.chmod(dst, st.st_mode | stat.S_IEXEC)
+
+    for mod_name, src_dir in MODULES_TO_INSTALL:
+        src = os.path.join(src_dir, mod_name)
+        dst = os.path.join(hook_dir, mod_name)
+        if not os.path.exists(src):
+            print(f"❌ Error: Module {src} not found.")
+            continue
+        with open(src, "r") as f:
+            content = f.read()
+        with open(dst, "w", newline="\n") as f:
+            f.write(content)
 
     print("✅ Hooks installed. Proof-of-Work protocol is now active.")
 

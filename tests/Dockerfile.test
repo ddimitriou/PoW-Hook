@@ -1,9 +1,10 @@
 FROM ubuntu:22.04
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1
 RUN apt-get update -qq && \
-    apt-get install -y -qq python3 python3-pip git openssh-client && \
+    apt-get install -y -qq python3 python3-pip python3-venv git openssh-client curl && \
     pip3 install -q cryptography pytest && \
     git config --global init.defaultBranch master && \
     git config --global user.email "ci@test.com" && \
-    git config --global user.name "CI"
+    git config --global user.name "CI" && \
+    git config --global --add safe.directory '*'
 CMD ["python3", "-m", "pytest", "tests/test_hooks.py", "-v", "--tb=short"]

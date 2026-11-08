@@ -86,9 +86,11 @@ For each developer this should be installed locally in their repository. You can
 ```
 
 This will:
-- Detect the SSH private key used for GitHub (`ssh -G github.com`).
-- Create a Python virtual environment (`.venv/`).
-- Install `pre-commit`, `commit-msg`, and `pre-merge-commit` hooks with the correct interpreter path.
+- Detect the SSH private key used for GitHub (`ssh -G github.com`) and store it as `ssh_key` in the `POW` JSON of `.env`.
+- Create a central Python virtual environment (`~/.pow-hook/venv`).
+- Install `pre-commit`, `commit-msg`, and `pre-merge-commit` hooks (plus the shared `pow_client.py` / `pow_trailer.py` modules) with the correct interpreter path.
+
+For the full v2 protocol (challenge-corpus proof of execution) the `POW` JSON also needs `github_pat_local`, `github_repo` and `corpus_cmd` — see [section 6](#6-developer-env-configuration). Without them the hooks emit v1 trailers, which the server accepts only while `allow_v1` is `"true"`.
 
 The key used for signing must be [registered on the developer's GitHub account](https://github.com/settings/keys). No manual public key exchange with the admin is needed — keys are fetched live from the GitHub API at verification time.
 
@@ -115,10 +117,15 @@ From step 5 onward, every commit must carry a valid PoW signature.
 | Secret               | Description                                                         |
 |----------------------|---------------------------------------------------------------------|
 | `GITHUB_TOKEN`       | Auto-provided by GitHub Actions — no manual setup required          |
-| `POW_ADMIN_HANDLES`  | *(Optional)* Space-separated `@handles` to tag on PR violations (injected into `POW` JSON in the workflow) |
-| `POW_GITHUB_API_URL` | *(Optional)* Override GitHub API base URL for Enterprise Server (injected into `POW` JSON in the workflow) |
+| `POW_HMAC_KEY`       | **Required for v2.** Injected as `hmac_key`; shared by the ledger (mints challenge tags) and the validator (verifies receipts). `admin_install.py` prints a fresh value; or `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `POW_ADMIN_HANDLES`  | *(Optional)* Space-separated `@handles` to tag on PR violations and sweep issues (injected as `admin_handles`) |
+| `POW_REVOKE_WEBHOOK` | *(Optional)* URL the nightly sweep POSTs new violations to (injected as `revoke_webhook`; `POW_REVOKE_WEBHOOK_TOKEN` as bearer token) |
+| `POW_GITHUB_API_URL` | *(Optional)* Override GitHub API base URL for Enterprise Server (injected as `github_api_url`) |
 
 No developer public keys need to be stored as secrets — they are resolved at runtime from each committer's GitHub profile.
+
+> [!IMPORTANT]
+> Anyone with write access can dispatch `pow-ledger.yml` on *their own branch* with a tampered copy of the workflow. The validator therefore only accepts challenges minted from `ledger_ref` (default `main`), and you should store `POW_HMAC_KEY` in a GitHub **environment** whose deployment-branch policy only allows `main` (then set `environment: pow-ledger` on the `mint-challenge` job). Repo admins can read secrets regardless; that is an explicit non-goal (see `SPEC.md`).
 
 ### 5. GitHub Workflow Setup (`POW` env var)
 
@@ -129,45 +136,101 @@ In `.github/workflows/pow-validator.yml`, ensure the `POW` environment variable 
 env:
   POW: >-
     {
-      "checks_cmd": "docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail",
-      "enforce": "true"
+      "checks_cmd": "docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:3.99.8 filesystem /pwd --no-verification --fail",
+      "enforce": "true",
+      "allow_v1": "true",
+      "auto_revert": "false",
+      "ledger_ref": "main",
+      "hmac_key": "${{ secrets.POW_HMAC_KEY }}"
     }
 ```
 
-We're using [trufflehog](https://github.com/trufflesecurity/trufflehog) as the sample secret key search mechanism.
+We're using [trufflehog](https://github.com/trufflesecurity/trufflehog) as the sample secret scanner. The image tag is **pinned** on purpose: the challenge receipt (see Deterrence Mechanisms below) and the nightly sweep only agree with the client when everyone runs the same scanner build. The same tag appears in `pow-ledger.yml` (`POW_SCANNER_IMAGE`), `pow-sweep.yml` and the developers' `corpus_cmd`; bump them together.
+
+Server-side keys of the `POW` JSON:
+
+| Key           | Default   | Meaning                                                                                   |
+|---------------|-----------|-------------------------------------------------------------------------------------------|
+| `enforce`     | `"false"` | Flip to `"true"` on the second commit (see bootstrap above)                               |
+| `allow_v1`    | `"true"`  | Accept v1 / legacy trailers (no challenge receipt) during migration; set `"false"` once all clients run v2 |
+| `auto_revert` | `"false"` | Force-reset the branch on *cryptographically confirmed* forgeries (needs `contents: write`) |
+| `ledger_ref`  | `main`    | Only challenges minted by `pow-ledger.yml` on this ref are accepted                       |
+| `hmac_key`    | —         | Secret shared with `pow-ledger.yml`                                                       |
+
+After every commit verifies, the validator also **re-runs `checks_cmd` on the checked-out tree** as a zero-trust fallback.
 
 ### 6. Developer `.env` Configuration
 
 All configuration is set via a single `POW` environment variable containing a JSON object:
 
 ```env
-POW='{"checks_cmd":"docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail","github_pat_local":"ghp_...","github_repo":"owner/repo"}'
+POW='{"checks_cmd":"docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:3.99.8 filesystem /pwd --no-verification --fail","corpus_cmd":"docker run --rm -v \"{corpus_dir}\":/pwd trufflesecurity/trufflehog:3.99.8 filesystem /pwd --no-verification --json","github_pat_local":"ghp_...","github_repo":"owner/repo"}'
 ```
 
 | Key | Description |
 |-----|-------------|
-| `checks_cmd` | Command to run before signing (e.g., linters, secret scanners) |
-| `github_pat_local` | GitHub PAT with `actions` scope (server-side attestation) |
-| `github_repo` | `owner/repo` slug for attestation dispatch |
+| `checks_cmd` | Command to run before signing (e.g., linters, secret scanners); must equal the server's byte-for-byte |
+| `corpus_cmd` | Challenge-corpus scan — same pinned scanner, JSON output; `{corpus_dir}` is substituted |
+| `github_pat_local` | GitHub PAT used to dispatch the ledger and download challenge artifacts (classic: `repo` + `workflow`; fine-grained: Actions read/write) |
+| `github_repo` | `owner/repo` slug for attestation dispatch (`install.sh` fills it from the origin remote) |
 | `ssh_key` | Path to SSH private key (auto-detected by `setup_hooks.py`) |
-| `admin_handles` | Space-separated `@handles` for PR violation notifications |
-| `enforce` | Set to `"true"` to enable server-side enforcement |
+| `ledger_ref` | Ref `pow-ledger.yml` is dispatched on (default `main`) |
+| `challenge_timeout` / `challenge_poll` | Seconds to wait for the minted corpus (default 180) / poll interval (default 5) |
+| `challenge_optional` | `"true"`: fall back to a v1 trailer when minting fails |
+| `admin_handles` | Space-separated `@handles` for PR violation notifications (server) |
+| `enforce` | Set to `"true"` to enable server-side enforcement (server) |
 | `github_api_url` | Override GitHub API base URL (Enterprise Server) |
 | `github_token` | GitHub token for pre-receive hook (Enterprise) |
+| `allow_v1` | Pre-receive / validator: accept v1 and legacy trailers (default `"true"`) |
 | `ssh_key_override` | Override SSH key path for testing/CI |
+
+Each commit costs one ledger workflow spin-up (typically 15–60 s); the real tree scan runs while the challenge is being minted.
+
+---
+
+## Deterrence Mechanisms (v2)
+
+PoW-Hook v1 proved *who* attested *what tree*. A malicious developer with admin rights on their own machine could still stub the scanner and sign a `PASSED` verdict. v2 adds two mechanisms (design in [`SPEC.md`](SPEC.md)) that make forgery **noisy, non-repudiable and no faster than compliance**:
+
+### A. Challenge-Corpus Proof of Execution
+
+1. `pre-commit` dispatches `MINT_CHALLENGE` to `pow-ledger.yml`.
+2. The ledger generates a small corpus (20–50 files) with 3–8 **planted** secrets (random AWS / GitHub / Stripe / Slack / … shapes the pinned scanner detects) and 5–15 **decoys** (near-misses it provably ignores), self-checks it against the pinned scanner, and publishes `pow-challenge-<session>` with an HMAC tag over the expected findings. The expected receipt is never published.
+3. The client downloads the corpus, runs `corpus_cmd`, canonicalises the findings into a receipt (`detector:path:line:sha256(secret)` lines, sorted, plus tool version) and signs it inside the **v2 trailer** together with the tree hash, session, challenge id and a lineage anchor.
+4. The validator recomputes `HMAC(key, challenge_id|session_id|receipt)` and compares it with the minted tag. No server-side re-scan is needed. A receipt from a stubbed or wrong-version scanner is **INVALID**.
+
+### B. Nightly Audit Sweep
+
+`pow-sweep.yml` runs `trufflehog git` over the entire history every night and cross-references each finding with the attestation trailer of the commit that introduced it:
+
+| Class            | Meaning                                                                                           |
+|------------------|---------------------------------------------------------------------------------------------------|
+| `FORGERY`        | `PASSED` trailer, valid signature, matching cmd hash, secret present — the forger's own signature over a false verdict |
+| `VERSION_DRIFT`  | As above but the attested scanner version differs from the sweep's (warning)                      |
+| `LEAK_HONEST`    | Secret present, trailer absent / FAILED / unverifiable — the validator should have blocked it      |
+| `REPLAY`         | Same session or challenge id reused on several verifying commits                                  |
+| `MISSING`        | No trailer after the enforcement epoch (report only)                                              |
+
+Every run uploads a JSON + Markdown report (90-day retention). Violations open or update a single `🚨 PoW Sweep` issue tagging `admin_handles`, are optionally POSTed to `revoke_webhook`, and turn the run red. Findings before the enforcement epoch (`sweep_epoch`, default: the oldest attested commit) are baselined on the first run so historical noise never pages anyone.
 
 ---
 
 ## Automated Incident Response & Pull Requests
 
-When the server-side validator detects an invalid, fraudulent, or missing PoW signature on a pushed branch:
-1. It **obliterates** the unverified commits natively by force-pushing the branch back to the last known perfectly verified commit state.
-2. If there are any open **Pull Requests** attached to the compromised branch, it automatically closes them.
-3. It tags administrative handles (configured via `admin_handles` in the `POW` JSON) in the closed PR comments, notifying them of the breach.
+The validator reaches one of four outcomes per commit and stops at the first failure:
+
+| Outcome        | Cause                                                                                             | Effect                                                                 |
+|----------------|---------------------------------------------------------------------------------------------------|------------------------------------------------------------------------|
+| `OK`           | Trailer, signature, challenge receipt, ledger record and the server-side re-run of `checks_cmd` all pass | Check passes                                                    |
+| `REJECTED`     | Missing/malformed trailer, wrong cmd hash, status not `PASSED`, anchor mismatch, v1 not allowed, no ledger record, server-side check failed | Check fails; PR gets a comment tagging `admin_handles`; **refs are never rewritten** |
+| `INVALID`      | Signature does not verify against the author's registered keys, or the signed receipt contradicts the minted tag | Check fails; with `"auto_revert": "true"` the branch is force-reset to the last valid commit and open PRs are closed |
+| `INCONCLUSIVE` | GitHub API error or missing configuration (e.g. `hmac_key`)                                       | Check fails so branch protection blocks the merge; nothing is rewritten; re-run |
+
+Protect `main` with a required `verify-pow` status check so that red results actually block merges. Automatic reverts are opt-in and limited to cryptographically confirmed forgeries, so an API outage can never wipe a branch.
 
 > [!WARNING]
 > **Manual Hard-Deletion Required**
-> While PoW-Hook automatically blocks unverified commits and automatically closes compromised Pull Requests, GitHub's API does not expose functionality to completely, permanently hard-delete a Pull Request. To completely scrub the orphaned, unverified commit history completely outside of the repository's background cache refs, an administrator will be instructed to submit a ticket to GitHub Support with a direct link provided in the PR comment.
+> When a revert does happen, GitHub's API does not expose functionality to permanently hard-delete a Pull Request. To scrub the orphaned commits from the repository's background refs, an administrator is pointed (in the PR comment) to a GitHub Support ticket.
 
 ---
 
@@ -198,15 +261,17 @@ bash tests/run_tests_windows.sh
 
 ### CI E2E tests (no act required)
 
-These scripts run `verify_pow.py` directly against a lightweight mock GitHub API server. They work on any machine with Python 3 and `ssh-keygen`.
+These scripts run `verify_pow.py` directly against a lightweight mock GitHub API server that also acts as the ledger (it mints challenges solvable by `tests/fake_scanner.py`). They work on any Linux/macOS machine with Python 3 and `ssh-keygen`.
 
 ```bash
-# GitHub SSH signing + server-side verification
+# v2 signing + verification, INVALID (wrong hmac_key) and INCONCLUSIVE (API down) paths
 PYTHON=python3 bash tests/test_ci_github_ssh.sh
 
-# Trufflehog local scan + server-side bypass rejection (requires Docker)
+# Real pinned trufflehog: local block, bypass rejection, challenge mint determinism, nightly sweep (requires Docker)
 PYTHON=python3 bash tests/test_ci_trufflehog.sh
 ```
+
+The unit suite never needs Docker: the challenge protocol and the sweep are exercised with the fake scanner and the mock API. Set `POW_HOOK_PYTHON=/path/to/python` to make `setup_hooks.py` use a given interpreter instead of creating the central venv (the tests do this).
 
 ---
 
@@ -216,9 +281,10 @@ Pushing to any branch or opening a pull request triggers the CI workflow at `.gi
 
 | Job | What it does |
 |-----|--------------|
-| `unit-tests` | Runs `pytest test_hooks.py` directly on `ubuntu-latest` |
-| `e2e-github-ssh` | Runs `test_ci_github_ssh.sh` — verifies signing and rejection |
-| `e2e-trufflehog` | Runs `test_ci_trufflehog.sh` — verifies trufflehog scan and bypass rejection |
+| `lint` | flake8 — fails on syntax errors / undefined names, warns on style |
+| `unit-tests` | Runs `pytest test_hooks.py` directly on `ubuntu-latest` (codec, hooks, validator, challenge protocol, sweep) |
+| `e2e-github-ssh` | Runs `test_ci_github_ssh.sh` — v2 signing, challenge receipt, INVALID / INCONCLUSIVE paths, no refs rewritten |
+| `e2e-trufflehog` | Runs `test_ci_trufflehog.sh` — pinned trufflehog blocks a secret, bypass rejected, mint ↔ client receipt match, sweep flags the leak |
 
 E2E jobs only start if unit tests pass.
 
@@ -227,30 +293,39 @@ E2E jobs only start if unit tests pass.
 ## Project Structure
 
 ```
+├── SPEC.md                     # v2 deterrence design (challenge corpus + nightly sweep)
+│
 ├── tests/                      # Dedicated tests folder
-│   ├── test_hooks.py               # Unit test suite
-│   ├── test_mock_github_api.py     # Mock GitHub API server
-│   ├── test_ci_github_ssh.sh       # CI E2E: GitHub SSH signing
-│   ├── test_ci_trufflehog.sh       # CI E2E: Trufflehog scan
+│   ├── test_hooks.py               # Unit + integration suite (codec, hooks, validator, challenge, sweep)
+│   ├── test_mock_github_api.py     # Mock GitHub API + ledger (mints fake challenges)
+│   ├── fake_scanner.py             # Deterministic trufflehog stand-in (no Docker)
+│   ├── test_ci_github_ssh.sh       # CI E2E: v2 signing, INVALID / INCONCLUSIVE paths
+│   ├── test_ci_trufflehog.sh       # CI E2E: real trufflehog scan, mint determinism, sweep
 │   ├── test_e2e_github_ssh.sh      # Local E2E: act simulation
 │   ├── test_e2e_act_trufflehog.sh  # Local E2E: act trufflehog
 │   ├── run_tests_windows.sh        # Dockerized test runner (Windows-only)
-│   └── Dockerfile.test            # Container for unit tests
+│   └── Dockerfile.test             # Container for unit tests
 │
 ├── hooks_templates/
-│   ├── pre-commit              # Runs checks, dispatches attestation, writes session
-│   ├── pre-merge-commit        # Same as pre-commit, for merge operations
-│   └── commit-msg              # Signs tri-factor payload with SSH key, injects trailers
+│   ├── pre-commit              # Thin wrapper → pow_client.run_session
+│   ├── pre-merge-commit        # Same, for merge operations
+│   ├── commit-msg              # Signs the v1/v2 payload with the SSH key, injects the trailer
+│   └── pow_client.py           # Session flow: dispatch, checks, challenge download + receipt
 │
 ├── admin_templates/
 │   ├── github/
 │   │   ├── workflows/
 │   │   │   ├── pow-validator.yml   # Push/PR gatekeeper (GitHub Actions)
-│   │   │   └── pow-ledger.yml      # Attestation recorder (workflow_dispatch)
+│   │   │   ├── pow-ledger.yml      # Attestation recorder + challenge minter (workflow_dispatch)
+│   │   │   └── pow-sweep.yml       # Nightly full-history audit sweep
 │   │   └── scripts/
-│   │       └── verify_pow.py       # Verifier: SSH key lookup + artifact cross-check
+│   │       ├── pow_trailer.py      # Shared protocol: POW config loader, trailer codec, receipt, HMAC tag
+│   │       ├── pow_github.py       # GitHub API helpers (ApiError → INCONCLUSIVE)
+│   │       ├── verify_pow.py       # Validator: signature, challenge receipt, ledger record, server re-run
+│   │       ├── mint_challenge.py   # Corpus generator + self-check + tag
+│   │       └── sweep_audit.py      # Cross-reference findings ↔ trailers, report, issue, webhook
 │   └── pre-receive_hook/
-│       └── pre-receive             # Verifier for GitHub Enterprise (pre-receive hook)
+│       └── pre-receive             # Standalone verifier for GitHub Enterprise (legacy, v1 and v2 trailers)
 │
 ├── .github/
 │   └── workflows/

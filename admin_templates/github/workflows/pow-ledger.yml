@@ -1,4 +1,14 @@
 name: PoW Attestation Ledger
+run-name: "PoW ${{ inputs.state }} · ${{ inputs.session_id }}"
+
+# Dispatched by the developer's pre-commit hook.  Records STARTED / PASSED /
+# FAILED attestations as artifacts and, for MINT_CHALLENGE, mints the
+# challenge corpus the client must scan (SPEC.md section A).
+#
+# SECURITY: inputs are attacker-controlled (anyone with a dispatch-capable PAT).
+# They are only ever read from environment variables and validated against
+# strict patterns - never interpolated into shell text - so a crafted
+# session_id cannot run commands or read POW_HMAC_KEY.
 
 on:
   workflow_dispatch:
@@ -16,44 +26,105 @@ on:
         required: true
         type: string
       state:
-        description: 'Attestation state: STARTED, PASSED, or FAILED'
+        description: 'Attestation state: STARTED, MINT_CHALLENGE, PASSED or FAILED'
         required: true
         type: string
+
+permissions:
+  contents: read
+
+env:
+  # Pinned scanner.  Must be the same image developers use in corpus_cmd.
+  POW_SCANNER_IMAGE: trufflesecurity/trufflehog:3.99.8
 
 jobs:
   record-attestation:
     runs-on: ubuntu-latest
+    env:
+      SESSION_ID: ${{ inputs.session_id }}
+      CHECKS_HASH: ${{ inputs.pow_checks_hash }}
+      TREE_HASH: ${{ inputs.tree_hash }}
+      STATE: ${{ inputs.state }}
     steps:
-      - name: Validate Inputs
+      - name: Validate inputs
         run: |
-          echo "📜 Recording PoW Attestation..."
-          echo "  Session:     ${{ inputs.session_id }}"
-          echo "  Checks Hash: ${{ inputs.pow_checks_hash }}"
-          echo "  Tree Hash:   ${{ inputs.tree_hash }}"
-          echo "  State:       ${{ inputs.state }}"
+          [[ "$SESSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || { echo "❌ invalid session_id"; exit 1; }
+          [[ "$CHECKS_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo "❌ invalid pow_checks_hash"; exit 1; }
+          [[ "$TREE_HASH" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "❌ invalid tree_hash"; exit 1; }
+          case "$STATE" in
+            STARTED|MINT_CHALLENGE|PASSED|FAILED) ;;
+            *) echo "❌ invalid state"; exit 1 ;;
+          esac
+          RECORD_STATE="$STATE"
+          if [[ "$STATE" == "MINT_CHALLENGE" ]]; then RECORD_STATE="STARTED"; fi
+          echo "RECORD_STATE=$RECORD_STATE" >> "$GITHUB_ENV"
+          echo "📜 Recording PoW attestation"
+          echo "  Session:     $SESSION_ID"
+          echo "  Checks Hash: $CHECKS_HASH"
+          echo "  Tree Hash:   $TREE_HASH"
+          echo "  State:       $RECORD_STATE"
 
-          if [[ "${{ inputs.state }}" != "STARTED" && "${{ inputs.state }}" != "PASSED" && "${{ inputs.state }}" != "FAILED" ]]; then
-            echo "❌ Invalid state: ${{ inputs.state }}"
-            exit 1
-          fi
-
-      - name: Create Attestation Record
+      - name: Create attestation record
         run: |
           mkdir -p attestation
-          cat << EOF > attestation/record.json
-          {
-            "session_id": "${{ inputs.session_id }}",
-            "pow_checks_hash": "${{ inputs.pow_checks_hash }}",
-            "tree_hash": "${{ inputs.tree_hash }}",
-            "state": "${{ inputs.state }}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 - <<'PY'
+          import json, os, datetime
+          record = {
+              "session_id": os.environ["SESSION_ID"],
+              "pow_checks_hash": os.environ["CHECKS_HASH"],
+              "tree_hash": os.environ["TREE_HASH"],
+              "state": os.environ["RECORD_STATE"],
+              "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
           }
-          EOF
-          cat attestation/record.json
+          with open("attestation/record.json", "w") as f:
+              json.dump(record, f, indent=2)
+          print(json.dumps(record, indent=2))
+          PY
 
-      - name: Upload Attestation Artifact
+      - name: Upload attestation artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "pow-attestation-${{ inputs.session_id }}-${{ inputs.pow_checks_hash }}-${{ inputs.state }}"
+          name: "pow-attestation-${{ inputs.session_id }}-${{ inputs.pow_checks_hash }}-${{ env.RECORD_STATE }}"
           path: attestation/record.json
+          retention-days: 90
+
+  mint-challenge:
+    if: inputs.state == 'MINT_CHALLENGE'
+    runs-on: ubuntu-latest
+    # Recommended: keep POW_HMAC_KEY in a GitHub *environment* whose deployment
+    # branch policy only allows the default branch, and uncomment:
+    # environment: pow-ledger
+    env:
+      SESSION_ID: ${{ inputs.session_id }}
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "$SESSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || { echo "❌ invalid session_id"; exit 1; }
+
+      - name: Checkout scripts
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Pull pinned scanner
+        run: docker pull "$POW_SCANNER_IMAGE"
+
+      - name: Mint challenge corpus
+        env:
+          POW: >-
+            {
+              "hmac_key": "${{ secrets.POW_HMAC_KEY }}",
+              "scanner_image": "${{ env.POW_SCANNER_IMAGE }}"
+            }
+          POW_SESSION_ID: ${{ inputs.session_id }}
+        run: python3 .github/scripts/mint_challenge.py --out "$RUNNER_TEMP/challenge"
+
+      - name: Upload challenge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "pow-challenge-${{ inputs.session_id }}"
+          path: ${{ runner.temp }}/challenge
           retention-days: 90
