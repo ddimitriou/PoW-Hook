@@ -29,15 +29,15 @@ echo "🔍 Checking prerequisites..."
 command -v "$ACT" >/dev/null 2>&1 || { echo "❌ 'act' not found. Install from https://github.com/nektos/act"; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "❌ Docker not found."; exit 1; }
 $PYTHON -c "import cryptography" 2>/dev/null || { echo "❌ cryptography package not installed for $PYTHON"; exit 1; }
-docker image inspect trufflesecurity/trufflehog:latest >/dev/null 2>&1 \
-    || docker pull trufflesecurity/trufflehog:latest \
-    || { echo "❌ Could not pull trufflesecurity/trufflehog:latest"; exit 1; }
+docker image inspect trufflesecurity/trufflehog:3.99.8 >/dev/null 2>&1 \
+    || docker pull trufflesecurity/trufflehog:3.99.8 \
+    || { echo "❌ Could not pull trufflesecurity/trufflehog:3.99.8"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
 
-TRUFFLEHOG_CMD='docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:latest filesystem /pwd --no-verification --fail'
+TRUFFLEHOG_CMD='docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:3.99.8 filesystem /pwd --no-verification --fail'
 
 cleanup() {
     set +euo pipefail
@@ -93,7 +93,7 @@ $PYTHON setup_hooks.py
 
 # Scaffold .github for the act workflow
 mkdir -p .github/scripts .github/workflows
-cp admin_templates/github/scripts/verify_pow.py .github/scripts/
+cp admin_templates/github/scripts/*.py .github/scripts/
 
 cat > .github/workflows/pow-validator.yml << 'WORKFLOW'
 name: Proof of Work Validator
@@ -133,7 +133,7 @@ echo "════════════════════════�
 # GitHub classic PAT format: ghp_ + exactly 36 alphanumeric chars.
 # Trufflehog detects this by regex pattern (--no-verification skips
 # the live API call, so any string matching the pattern is flagged).
-echo "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" > malicious_secret.txt
+echo "ghp_$($PYTHON -c "import secrets,string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(36)))")" > malicious_secret.txt
 git add malicious_secret.txt
 
 set +e

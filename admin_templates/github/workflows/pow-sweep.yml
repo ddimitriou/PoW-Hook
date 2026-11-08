@@ -1,0 +1,95 @@
+name: PoW Nightly Sweep
+
+# Scans the entire repository history with the pinned scanner and
+# cross-references every finding against the PoW attestation trailers
+# (SPEC.md section B).  A PASSED attestation over a tree that contains a
+# secret is cryptographic evidence of a forged attestation.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+env:
+  POW_SCANNER_IMAGE: trufflesecurity/trufflehog:3.99.8
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install cryptography
+
+      - name: Scan full history with the pinned scanner
+        run: |
+          docker pull "$POW_SCANNER_IMAGE"
+          docker run --rm -v "$PWD":/pwd "$POW_SCANNER_IMAGE" git file:///pwd --no-verification --json \
+            > "$RUNNER_TEMP/findings.jsonl"
+          echo "POW_SCANNER_VERSION=$(docker run --rm "$POW_SCANNER_IMAGE" --version 2>&1 | head -n1)" >> "$GITHUB_ENV"
+          echo "Findings: $(wc -l < "$RUNNER_TEMP/findings.jsonl")"
+
+      - name: Cross-reference attestations
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POW_FINDINGS_FILE: ${{ runner.temp }}/findings.jsonl
+          POW_SWEEP_OUT_DIR: ${{ runner.temp }}/pow-sweep-out
+          # ---------------------------------------------------------------
+          # Settings live in the single POW JSON object.
+          #   checks_cmd      same string as in pow-validator.yml - honest
+          #                   trailers carry its SHA-256.
+          #   sweep_epoch     enforcement epoch: commit SHA, ISO date or epoch
+          #                   seconds.  Empty = the oldest commit carrying a PoW
+          #                   trailer.  Findings before the epoch are baselined
+          #                   on the first run and suppressed afterwards.
+          #   sweep_fail_on   new = red only when a violation is first seen;
+          #                   any = red while any violation exists.
+          #   revoke_webhook  optional payoff-reduction dial: POST each new
+          #                   violation to an org endpoint that rotates/revokes.
+          # ---------------------------------------------------------------
+          POW: >-
+            {
+              "checks_cmd": "docker run --rm -v \"$(git rev-parse --show-toplevel)\":/pwd trufflesecurity/trufflehog:3.99.8 filesystem /pwd --no-verification --fail",
+              "sweep_epoch": "",
+              "sweep_fail_on": "new",
+              "admin_handles": "${{ secrets.POW_ADMIN_HANDLES }}",
+              "github_api_url": "${{ secrets.POW_GITHUB_API_URL }}",
+              "revoke_webhook": "${{ secrets.POW_REVOKE_WEBHOOK }}",
+              "revoke_webhook_token": "${{ secrets.POW_REVOKE_WEBHOOK_TOKEN }}"
+            }
+        run: python3 .github/scripts/sweep_audit.py
+
+      - name: Upload sweep report (transparency record)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pow-sweep-report-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pow-sweep-out/report.json
+            ${{ runner.temp }}/pow-sweep-out/report.md
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload sweep state (watermark + baseline)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pow-sweep-state
+          path: ${{ runner.temp }}/pow-sweep-out/state.json
+          retention-days: 90
+          if-no-files-found: warn

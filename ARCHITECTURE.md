@@ -65,17 +65,24 @@ sequenceDiagram
     
     %% Attestation Dispatch
     Note over Git, Ledger: Phase 2: Remote Attestation
-    Git->>Ledger: workflow_dispatch (Session ID, Status, Cmd Hash)
-    Git->>Git: Write execution metadata to `.git/POW_PASSED`
+    Git->>Ledger: workflow_dispatch MINT_CHALLENGE (Session ID, Tree, Cmd Hash)
+    Ledger->>Ledger: Generate corpus: K planted secrets + M decoys
+    Ledger->>Ledger: Self-check with pinned scanner, R_expected = receipt(findings)
+    Ledger->>Ledger: tag = HMAC(hmac_key, challenge_id|session_id|R_expected)
+    Ledger-->>GH: Upload `pow-challenge-{session}` (corpus.tar, challenge.json)
+    Git->>GH: Poll + download `pow-challenge-{session}`
+    Git->>Git: Run `corpus_cmd` on the corpus → receipt
+    Git->>Ledger: workflow_dispatch PASSED / FAILED
     Ledger-->>GH: Upload Ledger Artifact<br/>`pow-attestation-{session}-{cmd_hash}-PASSED`
+    Git->>Git: Write session + challenge_id + receipt to `<git-dir>/POW_PASSED`
     
     Note over Dev, Git: Phase 3: Cryptographic Signing
     Git->>Git: Execute `commit-msg` hook
-    Git->>Git: Retrieve Tree Hash natively
-    Git->>Git: Read metadata from `.git/POW_PASSED`
-    Git->>Git: Construct Payload `checks_hash|tree_hash|session_id|status`
+    Git->>Git: Retrieve Tree Hash, anchor = HEAD~1
+    Git->>Git: Read metadata from `<git-dir>/POW_PASSED`
+    Git->>Git: Payload `checks_hash|tree_hash|session_id|status|challenge_id|receipt|anchor`
     Git->>Git: Digitally Sign payload with Local SSH Private Key
-    Git->>Git: Base64 Encode JSON bundle
+    Git->>Git: Pack binary v2 trailer, Base64 encode
     Git->>Git: Inject `PoW-Checks: <Base64>` metadata trailer
     Git-->>Dev: Commit finalized locally
 
@@ -97,14 +104,45 @@ sequenceDiagram
     
     Validator->>Validator: Independently execute checks_cmd on server codebase
     
-    alt If Signature, Hash, Artifacts match, AND Check passes
-        Validator-->>GH: Accept Commit natively
-    else Any deviation
-        Validator-->>GH: Block Push / Revert Forcefully natively
-        Validator->>GH: Query open Pull Requests bound to branch
-        Validator->>GH: Close compromised Pull Request automatically
+    Validator->>Validator: Assert status == PASSED, anchor ∈ {parent, grandparent}
+    Validator->>GH: Fetch `pow-challenge-{session}` (must come from pow-ledger.yml on ledger_ref, ≤ 24 h old)
+    Validator->>Validator: HMAC(hmac_key, challenge_id|session_id|receipt) == tag ?
+
+    alt OK — signature, hash, receipt, artifact and server-side check all pass
+        Validator-->>GH: Check passes
+    else REJECTED (policy) / INCONCLUSIVE (API or config)
+        Validator-->>GH: Check fails, PR comment, refs untouched
+    else INVALID (confirmed forgery) and auto_revert = "true"
+        Validator-->>GH: Force-reset branch to last valid commit, close PRs
         Validator->>GH: Post Tagged Comment with Support Ticket URL
         GH-->>Dev: Alert administrators of unverified commit breach
+    end
+```
+
+## Nightly Audit Sweep (pow-sweep.yml)
+
+```mermaid
+sequenceDiagram
+    participant Cron as Scheduled run (02:17 UTC)
+    participant TH as Pinned trufflehog<br/>(git source, full history)
+    participant Sweep as sweep_audit.py
+    participant GH as GitHub API
+
+    Cron->>TH: trufflehog git file:///repo --json
+    TH-->>Sweep: findings.jsonl (commit, file, line, secret)
+    Sweep->>Sweep: Decode PoW trailer of every post-epoch commit
+    Sweep->>Sweep: Suppress baseline (pre-epoch) fingerprints
+    loop commits with findings
+        Sweep->>GH: Resolve author, fetch keys, verify signature
+        Sweep->>GH: Fetch challenge artifact → attested scanner version
+        Sweep->>Sweep: FORGERY / VERSION_DRIFT / LEAK_HONEST / INCONCLUSIVE
+    end
+    Sweep->>Sweep: REPLAY = session/challenge id on >1 verifying commit
+    Sweep-->>GH: Upload report (JSON + Markdown) and state (watermark, baseline, reported ids)
+    alt new violations
+        Sweep->>GH: Open / update single "🚨 PoW Sweep" issue, tag admin_handles
+        Sweep->>GH: POST revoke_webhook (detector, sha256(secret), commit, author)
+        Sweep-->>Cron: exit 1 (red)
     end
 ```
 
@@ -124,7 +162,21 @@ Date:   Sun May 3 20:41:00 2026 +0300
 ```
 
 ### Decoded PoW-Checks Trailer
-The `PoW-Checks` value is a Base64-encoded JSON bundle containing the signature and session metadata:
+
+Current hooks emit a compact **binary** trailer (base64 of the packed bytes):
+
+```text
+v1: [0x01][2B BE sig_len][sig][16B session UUID][1B status][32B checks_hash]
+v2: [0x02][2B BE sig_len][sig][16B session UUID][1B status][32B checks_hash]
+    [16B challenge UUID][32B receipt][20B anchor commit SHA-1]
+```
+
+- **sig**: signature over `checks_hash|tree_hash|session_id|status` (v1) or `…|challenge_id|receipt|anchor_sha` (v2) made with the developer's SSH private key.
+- **status**: `0x01` = PASSED, `0x00` = FAILED (the validator requires PASSED).
+- **challenge_id / receipt**: the minted challenge and the canonical receipt of the client's corpus scan; verified against the ledger's HMAC tag.
+- **anchor**: first parent of HEAD at commit time; the validator accepts the commit's parent or grandparent, so `--amend` works and a trailer cannot be moved to an unrelated commit.
+
+Commits made before the binary format (shown below) carry a Base64-encoded **legacy JSON bundle**; the validator, pre-receive hook and sweep still decode it as a v1-equivalent trailer while `allow_v1` is `"true"`:
 
 ```json
 {
@@ -147,3 +199,14 @@ The `PoW-Checks` value is a Base64-encoded JSON bundle containing the signature 
 3. **Execution Masking Hacks**: The `checks_cmd` is cryptographically packaged and verified. A developer cannot run `docker run my-fake-tests` locally because the server gatekeeper will hash its own expected command string and detect the divergence.
 4. **Air-Gap Prevention**: The async Ledger step guarantees that developers cannot "mock" a signature locally without checking in with the server. Even if a local signature evaluates flawlessly, if the GitHub Action Ledger never generated the secondary artifact, the push is aggressively rejected.
 5. **Zero-Trust Server Execution Fallback**: Even if an attacker maliciously forges a signature and manually spoofs the Ledger attestation via the GitHub API, the server gatekeeper independently executes the exact same quality checks on the incoming repository state. Any securely injected vulnerabilities are caught via this zero-trust mechanism.
+6. **Proof of Execution (v2)**: The challenge corpus is unpredictable and minted per session. Producing the receipt the validator expects requires reproducing the pinned scanner's detector logic on fresh input — the cheapest way to do that is to actually run the scanner. The server never re-scans the corpus; it checks `HMAC(hmac_key, challenge_id|session_id|receipt)` against the tag it committed to at mint time.
+7. **Lineage binding**: v2 trailers sign an anchor (first parent of HEAD at commit time, verified against the commit's parent *or* grandparent so `git commit --amend` keeps working). A trailer lifted onto an unrelated commit with the same tree fails the anchor check; the sweep additionally flags reused session / challenge ids as `REPLAY`.
+8. **Certain detection (v2)**: Forgery cannot be made impossible on github.com (no third-party pre-receive), so the nightly sweep makes it *certain to be detected within 24 h*, attributable to a GitHub account, with the forger's own signature over a false verdict as evidence.
+9. **No destructive false positives**: Every git invocation uses argv lists (attacker-controlled branch names never reach a shell), the ledger validates its dispatch inputs before touching `hmac_key`, and API failures yield `INCONCLUSIVE` (red, never a rewrite). Force-resets are opt-in (`auto_revert`) and limited to cryptographically confirmed `INVALID` outcomes.
+
+## Residual Risks (documented non-goals)
+
+- A determined insider who *runs* the scanner on the corpus and the tree, then suppresses the tree findings, defeats the challenge alone — the server-side re-run of `checks_cmd` and the nightly sweep catch this.
+- A **repository admin** can read Actions secrets (`POW_HMAC_KEY`) and delete workflows; out of scope.
+- Secret *exposure* on the cloud remote is not prevented (detection is post-ingestion by design); the sweep's revocation webhook is the payoff-reduction dial.
+- The sweep attributes a secret to the commit that *introduced* it (trufflehog git mode). A later `PASSED` commit that merely inherits an already-present secret is not re-flagged.
